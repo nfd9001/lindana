@@ -48,10 +48,12 @@ module Lindana.Runtime
   , rdpBag
     -- * Expression evaluation (matcher-adjacent helper)
   , evalExpr
-  , evalElem
+  , evalExprG
+  , arith
   ) where
 
 import Control.Concurrent.STM
+import Data.Functor.Identity (Identity (..))
 import Data.List (find, findIndex)
 import qualified Data.Map.Strict as Map
 
@@ -227,49 +229,58 @@ rdpBag bag pats = inpBag bag (map (PatElem Read) pats)
 --------------------------------------------------------------------------------
 
 -- | Evaluate a construction-side expression to a value, given the
--- environment bound by the match. Variables come from the environment;
--- anything else is evaluated structurally.
+-- environment bound by the match. This is the pure, builtin-free
+-- specialisation of 'evalExprG' — see there for the real story.
 --
--- For tuple construction, use 'evalElem' on each element and
--- concatenate: @!@ splices (§4) expand a whole tuple's contents into
--- the surrounding tuple at that position — the continuation-passing
--- core. A degenerate splice of a non-tuple value yields that value
--- itself (accepted for now; alternatively an @error@ case).
---
--- This is the /deterministic core/ only: 'ECall' builtins like
--- @rand@ / @atomize@ and 'EBin' arithmetic on non-numeric operands
--- belong to the action layer per §3.3 (the matcher never validates
--- operand types; a failing action routes through @error@), and are
--- intentionally NOT implemented here yet. 'evalExpr' is partial on
--- those forms by design for now — the action runner (§7) will own
--- them.
+-- Still partial on 'EBin' arithmetic over non-numeric operands (the
+-- @error@ routing of §3.3 is an action-layer concern); 'evalExprG'
+-- carries 'ECall' builtins in its carrier instead.
 evalExpr :: Env -> Expr -> Val
-evalExpr env e = case e of
+evalExpr env e = runIdentity (evalExprG pureBuiltin env e)
+  where
+    pureBuiltin n _ = Identity
+      (error ("evalExpr: builtin " ++ n ++ " not implemented (action layer, §7)"))
+
+-- | Generalised expression evaluation. The @builtin@ callback owns
+-- @f(x)@ calls; the /action layer/ instantiates the carrier @f@ as
+-- 'STM' so that stateful builtins (@rand@'s seed, per §8) evaluate
+-- /inside/ the same transaction that matches and emits — keeping
+-- "read the join patterns, decide, write replacement tuples" (§8.2
+-- note) atomic. The pure 'evalExpr' instantiates @f ~ Identity@.
+--
+-- Arithmetic type errors remain Haskell-level @error@s here; routing
+-- them through the @error@ verb is the action layer's job (§3.3).
+evalExprG :: Monad f
+  => (Name -> [Val] -> f Val)   -- ^ builtin name, evaluated args
+  -> Env -> Expr -> f Val
+evalExprG builtin env e = case e of
   EVar n -> case Map.lookup n env of
-    Just v  -> v
+    Just v  -> pure v
     Nothing -> error ("evalExpr: unbound variable " ++ n)
-  EAtom n      -> VAtom n
-  EInt i       -> VInt i
-  EDouble d    -> VDouble d
-  EStr s       -> VStr s
-  ETuple es    -> VTuple (concatMap (evalElem env) es)
-  ESplice x    -> case evalExpr env x of
-    VTuple vs -> VTuple vs  -- full-tuple splice (§4): flattens one level
-    v         -> v          -- degenerate: splicing a non-tuple is itself
-  EBin op a b -> arith op (evalExpr env a) (evalExpr env b)
-  ENeg x      -> arith Sub (VInt 0) (evalExpr env x)
-  -- Action-layer territory (§3.3): left to the effect runner (§7).
-  ECall n _ ->
-    error ("evalExpr: builtin " ++ n ++ " not implemented (action layer, §7)")
+  EAtom n      -> pure (VAtom n)
+  EInt i       -> pure (VInt i)
+  EDouble d    -> pure (VDouble d)
+  EStr s       -> pure (VStr s)
+  ETuple es    -> VTuple . concat <$> traverse (evalElemG builtin env) es
+  ESplice x    -> do  -- full-tuple splice (§4): flattens one level
+    v <- evalExprG builtin env x
+    pure (case v of
+      VTuple vs -> VTuple vs
+      _         -> v)     -- degenerate: splicing a non-tuple is itself
+  EBin op a b  -> arith op <$> evalExprG builtin env a
+                           <*> evalExprG builtin env b
+  ENeg x       -> arith Sub (VInt 0) <$> evalExprG builtin env x
+  ECall n es   -> builtin n =<< traverse (evalExprG builtin env) es
 
 -- | Evaluate one element of a tuple in construction position:
 -- normally a singleton list; a spliced element contributes its
 -- contents (zero or more values) directly.
-evalElem :: Env -> Expr -> [Val]
-evalElem env (ESplice x) = case evalExpr env x of
-  VTuple vs -> vs
-  v         -> [v]
-evalElem env e = [evalExpr env e]
+evalElemG :: Monad f
+  => (Name -> [Val] -> f Val) -> Env -> Expr -> f [Val]
+evalElemG builtin env (ESplice x) = do
+  v <- evalExprG builtin env x
+  pure (case v of VTuple vs -> vs; _ -> [v])
+evalElemG builtin env e = (:[]) <$> evalExprG builtin env e
 
 arith :: Op -> Val -> Val -> Val
 arith op (VInt a) (VInt b)       = VInt (intOp op a b)
