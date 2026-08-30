@@ -1,0 +1,169 @@
+-- | Abstract syntax for Lindana programs, plus a pretty-printer whose
+-- output is itself valid Lindana source (round-trip friendly: parsing
+-- the rendered output yields an equal AST).
+--
+-- This is a shell: syntax is illustrative pending the real grammar pass
+-- (see lindana-handover.md §4). Not modelled yet: pattern-side @!@
+-- rest-capture, list/cons sugar, Terse->Restricted desugaring, effect
+-- bundles.
+module Lindana.Syntax
+  ( -- * AST
+    Name
+  , Program(..)
+  , Decl(..)
+  , PatElem(..)
+  , ReadMode(..)
+  , Pat(..)
+  , Expr(..)
+  , Op(..)
+  , Action(..)
+    -- * Pretty-printing
+  , renderProgram
+  , renderDecl
+  , renderPatList
+  , renderPat
+  , renderActionSeq
+  , renderAction
+  , renderExpr
+  ) where
+
+import Data.List (intercalate)
+
+type Name = String
+
+-- | A whole program: a sequence of top-level declarations
+-- (initial-bag block, bag blocks, bare machines for the implicit
+-- @Global@ bag).
+newtype Program = Program { progDecls :: [Decl] }
+  deriving (Eq, Show)
+
+data Decl
+  = Bag Name [Decl]             -- ^ @Name { ... }@ — named bag of machines.
+  | Initial [Expr]              -- ^ @{ ... }@ — initial bag tuples.
+  | Machine [PatElem] [Action]  -- ^ @pat, pat : actions@ (join patterns).
+  deriving (Eq, Show)
+
+-- | Per-clause read mode. @Take@ = @in@ (consume, the default),
+-- @Read@ = @rd@ (leave in the bag — the broadcast/fan-out mechanism).
+data ReadMode = Take | Read
+  deriving (Eq, Show)
+
+data PatElem = PatElem ReadMode Pat
+  deriving (Eq, Show)
+
+data Pat
+  = PVar Name                   -- ^ lowercase: variable
+  | PAtom Name                  -- ^ capitalized: atom
+  | PInt Integer
+  | PDouble Double
+  | PStr String
+  | PTuple [Pat]                -- ^ @()@, @(Tick,)@, @("add", a, b, c)@
+  deriving (Eq, Show)
+
+data Op = Add | Sub | Mul | Div | Eq | Neq
+  deriving (Eq, Show)
+
+data Expr
+  = EVar Name
+  | EAtom Name
+  | EInt Integer
+  | EDouble Double
+  | EStr String
+  | ETuple [Expr]
+  | ESplice Expr                -- ^ @e!@ — construction-side splice (§4).
+  | ECall Name [Expr]           -- ^ builtin call, e.g. @rand(n)@, @typeOf(x)@.
+  | EBin Op Expr Expr
+  | ENeg Expr
+  deriving (Eq, Show)
+
+data Action
+  = Out Expr                    -- ^ bare tuple emission (the default action).
+  | Lob Name Expr               -- ^ @lob Bag (...)@ — cross-bag send (§6.1).
+  | Say String [Expr]           -- ^ @say "fmt" args...@ — console side effect.
+  | Exit Expr
+  | Die                         -- ^ @die@ \/ @quit@ — terminate this machine.
+  | Sleep Expr                  -- ^ throttling back-off (§8); post-commit only.
+  | Panic Expr                  -- ^ @panic e@ — fatal (§6.4).
+  | Raise Expr                  -- ^ @error (...)@ — fire context into Error bag.
+  | If Expr [Action] [Action]   -- ^ Terse @if@; branches are action sequences.
+  deriving (Eq, Show)
+
+--------------------------------------------------------------------------------
+-- Pretty-printing
+--------------------------------------------------------------------------------
+
+renderProgram :: Program -> String
+renderProgram (Program ds) = concatMap (\d -> renderDecl d ++ "\n") ds
+
+renderDecl :: Decl -> String
+renderDecl (Machine lhs body) = renderPatList lhs ++ " : " ++ renderActionSeq body
+renderDecl (Initial ts) =
+  "{\n" ++ concatMap (\t -> "  " ++ renderExpr t ++ ",\n") ts ++ "}"
+renderDecl (Bag n ds) =
+  n ++ " {\n"
+  ++ concatMap (\d -> "  " ++ indent2 (renderDecl d) ++ "\n") ds
+  ++ "}"
+
+renderPatList :: [PatElem] -> String
+renderPatList = intercalate ", " . map pe
+  where
+    pe (PatElem Take p) = renderPat p
+    pe (PatElem Read p) = "rd " ++ renderPat p
+
+renderPat :: Pat -> String
+renderPat (PVar n)    = n
+renderPat (PAtom n)   = n
+renderPat (PInt i)    = show i
+renderPat (PDouble d) = show d
+renderPat (PStr s)    = show s
+renderPat (PTuple ps) = "(" ++ intercalate ", " (map renderPat ps) ++ ")"
+
+-- | A single action renders bare; multiple render as a bracketed Terse
+-- sequence @[a; b]@.
+renderActionSeq :: [Action] -> String
+renderActionSeq [a] = renderAction a
+renderActionSeq as  = "[" ++ intercalate "; " (map renderAction as) ++ "]"
+
+renderAction :: Action -> String
+renderAction (Out e)      = renderExpr e
+renderAction (Lob n e)    = "lob " ++ n ++ " " ++ renderExpr e
+renderAction (Say f es)   = unwords ("say" : show f : map renderExpr es)
+renderAction (Exit e)     = "exit " ++ renderExpr e
+renderAction Die          = "die"
+renderAction (Sleep e)    = "sleep " ++ renderExpr e
+renderAction (Panic e)    = "panic " ++ renderExpr e
+renderAction (Raise e)    = "error " ++ renderExpr e
+renderAction (If c t e)   =
+  "if " ++ renderExpr c ++ " then " ++ renderActionSeq t
+  ++ " else " ++ renderActionSeq e
+
+renderExpr :: Expr -> String
+renderExpr (EVar n)     = n
+renderExpr (EAtom n)    = n
+renderExpr (EInt i)     = show i
+renderExpr (EDouble d)  = show d
+renderExpr (EStr s)     = show s
+-- A one-element tuple needs a trailing comma to survive the round trip
+-- (bare @(x)@ reparses as parenthesised grouping in expression position).
+renderExpr (ETuple [e]) = "(" ++ renderElem e ++ ",)"
+renderExpr (ETuple es)  = "(" ++ intercalate ", " (map renderElem es) ++ ")"
+renderExpr (ESplice e)  = renderExpr e ++ "!"
+renderExpr (ECall n es) = n ++ "(" ++ intercalate ", " (map renderExpr es) ++ ")"
+renderExpr (EBin o a b) =
+  "(" ++ renderExpr a ++ " " ++ renderOp o ++ " " ++ renderExpr b ++ ")"
+renderExpr (ENeg e)     = "(-" ++ renderExpr e ++ ")"
+
+renderElem :: Expr -> String
+renderElem (ESplice e) = renderExpr e ++ "!"
+renderElem e           = renderExpr e
+
+renderOp :: Op -> String
+renderOp Add = "+"
+renderOp Sub = "-"
+renderOp Mul = "*"
+renderOp Div = "/"
+renderOp Eq  = "=="
+renderOp Neq = "!="
+
+indent2 :: String -> String
+indent2 = intercalate "\n" . map ("  " ++) . lines

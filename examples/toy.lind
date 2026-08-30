@@ -1,0 +1,7 @@
+{
+  (Add, 1, 2, ("Print",))
+}
+
+(Add, a, b, c) : (c!, a + b)
+(Print, s) : [say "Sum is %i" s; (Stop, 1)]
+(Stop, c) : if c then [say "Error, closing"; exit c] else [exit c]

@@ -1,0 +1,40 @@
+cabal-version:      2.4
+name:               lindana
+version:            0.1.0.0
+synopsis:           A recreational programming language about race conditions
+build-type:         Simple
+
+library
+    exposed-modules:  Lindana.Syntax
+                      Lindana.Parser
+    hs-source-dirs:   src
+    build-depends:    base >=4.14 && <5
+                    , text
+                    , mtl
+                    , transformers
+                    , containers
+                    , megaparsec >=9.0 && <9.3
+    default-language: Haskell2010
+    ghc-options:      -Wall
+
+executable lindana
+    main-is:          Main.hs
+    hs-source-dirs:   app
+    build-depends:    base
+                    , text
+                    , lindana
+                    , megaparsec >=9.0 && <9.3
+    default-language: Haskell2010
+    ghc-options:      -Wall
+
+test-suite lindana-test
+    type:             exitcode-stdio-1.0
+    main-is:          Spec.hs
+    hs-source-dirs:   test
+    build-depends:    base
+                    , text
+                    , lindana
+                    , hspec
+                    , megaparsec >=9.0 && <9.3
+    default-language: Haskell2010
+    ghc-options:      -Wall

@@ -1,0 +1,15 @@
+-- The §8.2 self-throttling example from the handover.
+{
+  (ResetEpoch, 0),
+  (Stats, Add, 0, 0)
+}
+
+(Tick,), (ResetEpoch, n) : (ResetEpoch, n + 1)
+
+("add", a, b, c), (Stats, Add, count, epoch), rd(ResetEpoch, e) :
+  if epoch != e then
+    [(Stats, Add, 0, e); ("add", a, b, c)]
+  else if rand(count) == 0 then
+    [(Stats, Add, 0, epoch); (c!, a + b)]
+  else
+    [(Stats, Add, count + 1, epoch); sleep(rand(count) * 5); ("add", a, b, c)]
