@@ -32,6 +32,7 @@ executable lindana
 test-suite lindana-test
     type:             exitcode-stdio-1.0
     main-is:          Spec.hs
+    other-modules:    Lindana.RuntimeSpec
     hs-source-dirs:   test
     build-depends:    base
                     , text
