@@ -7,7 +7,8 @@ import qualified Data.Text as T
 import Test.Hspec
 
 import Lindana.Parser (parseProgram)
-import Lindana.RuntimeSpec (spec)
+import Lindana.MachineSpec (spec)
+import qualified Lindana.RuntimeSpec as RuntimeSpec
 import Lindana.Syntax (Program, progDecls, renderProgram)
 import Text.Megaparsec.Error (errorBundlePretty)
 
@@ -72,5 +73,6 @@ main = hspec $ do
     it "round-trips the toy example through the pretty-printer" $
       roundTrips toySrc `shouldBe` True
   spec
+  RuntimeSpec.spec
   where
     shouldHaveLength xs n = length xs `shouldBe` n
