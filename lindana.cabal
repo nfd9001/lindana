@@ -7,12 +7,14 @@ build-type:         Simple
 library
     exposed-modules:  Lindana.Syntax
                       Lindana.Parser
+                      Lindana.Runtime
     hs-source-dirs:   src
     build-depends:    base >=4.14 && <5
                     , text
                     , mtl
                     , transformers
                     , containers
+                    , stm
                     , megaparsec >=9.0 && <9.3
     default-language: Haskell2010
     ghc-options:      -Wall
@@ -30,10 +32,14 @@ executable lindana
 test-suite lindana-test
     type:             exitcode-stdio-1.0
     main-is:          Spec.hs
+    other-modules:    Lindana.RuntimeSpec
     hs-source-dirs:   test
     build-depends:    base
                     , text
                     , lindana
+                    , async
+                    , containers
+                    , stm
                     , hspec
                     , megaparsec >=9.0 && <9.3
     default-language: Haskell2010

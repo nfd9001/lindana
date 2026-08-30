@@ -1,0 +1,36 @@
+PROVISIONAL DECISION — repeated variables in patterns (handover §11.2)
+=======================================================================
+
+Status:   PROVISIONAL, decided during the §3 runtime sketch
+          (branch runtime/stm-bag-matcher, commits 31d7e76..172d534).
+          Flippable; do not treat as final until a real grammar/
+          semantics pass ratifies it.
+
+Decision: Repeated variables within one pattern require structural
+          equality between the positions — Prolog-style. The match
+          FAILS on a second occurrence that binds a different value.
+
+            ("pair", a, a)   matches   ("pair", 3, 3)     YES
+            ("pair", a, a)   does NOT match ("pair", 3, 4)  NO
+
+          Rebinding/shadowing was the alternative and was NOT chosen.
+
+Where implemented:
+  - src/Lindana/Runtime.hs, matchPat (the PVar case: second lookup
+    compares Val equality instead of inserting).
+  - Tested in test/Lindana/RuntimeSpec.hs, "requires repeated
+    variables to bind equal values (§11.2, provisional)".
+
+Notes:
+  - The equality used is plain Val ==, i.e. the same equality the
+    language gives users — nothing deeper, per the "matcher checks
+    structure, actions check semantics" rule (§3.3 / §12).
+  - Provisional corollary decided in the same breath: int and double
+    literals do not cross-match (PInt 1 vs VDouble 1.0 fails). The
+    matcher is purely structural; mixed-arithmetic promotion (§11.3)
+    remains open and belongs to the action layer regardless.
+  - Full context recorded in lindana-handover.md §13.2.
+
+To flip later: change exactly the PVar case of matchPat to always
+insert (rebind), update the two RuntimeSpec cases, and amend §11.2 /
+§13.2 in the handover.

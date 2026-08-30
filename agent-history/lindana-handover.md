@@ -285,3 +285,36 @@ A few threads run through essentially every decision made so far, worth keeping 
 - **One capitalized-identifier lexical class does triple duty**: atoms, type-tags, and bag names are all just capitalized identifiers, disambiguated purely by syntactic position. Consistent with this rather than introducing new lexical categories.
 - **The matcher checks structure; actions check semantics.** Never move a semantic/type check into the matcher.
 - **Chaos is opt-*out*, not opt-in.** Racing matches, cross-invocation `ACont` collisions, and manual bytestring lifetime bugs are all deliberate, inspectable, and left un-guarded by default — mitigations (named bags, effect bundles, throttling) exist as things a programmer reaches for, not defaults the runtime imposes.
+
+---
+
+## 13. Implementation status (session notes)
+
+### 13.1 Done — STM tuple bag + matcher (§3), branch `runtime/stm-bag-matcher`
+
+`src/Lindana/Runtime.hs` implements the §3 sketch:
+
+- **`Val`** — runtime values (`VAtom`/`VInt`/`VDouble`/`VStr`/`VTuple`), mirroring the pattern/expr literal kinds. No list/string primitives (§9 sugar, not built); bytestring handles will be plain `VAtom`s + a side-table (§9, not built).
+- **`RBag`** — the runtime bag: one `TVar [Val]` per bag, i.e. the pre-sharding model of §3's opening. Named bags/sharding (§6) will hold several of these and pick the right `TVar`s inside one `atomically` — the R (vs Syntax's `Bag` Decl constructor) prefix avoids the name clash. Thundering herd (§3.1) is unmitigated until then, as expected.
+- **`matchJoinSTM`** — join patterns (§3.4) in one transaction; per-clause `Take`/`Read`; Take clauses consume *distinct* tuples (left-to-right against a working copy; a Read clause cannot match a tuple a Take clause consumed earlier in the same join — matches the §8.2 request+stats+epoch idiom). All-or-nothing is free from STM.
+- **Blocking verbs** `inBag`/`rdBag` (STM `retry`) and **probes** `inpBag`/`rdpBag` (the §8.1 primitive throttled machines must use).
+- **`evalExpr`/`evalElem`** — construction-side expression evaluation, including tuple splice `!` flattening (§4). Deliberately partial: builtins (`rand`, `atomize`, …) and arithmetic type errors belong to the action layer (§3.3, §7) and `error` there; not implemented yet.
+- Racing (§3.1) needed **zero extra code** — it's STM commit contention, as the design predicted. Tests confirm: exactly one winner among 16 contenders; 200 tuples conserved across 100 concurrent draining consumers.
+
+Tested in `test/Lindana/RuntimeSpec.hs` (23 cases, all green alongside the parser suite).
+
+### 13.2 Provisional decision made here (was open §11.2)
+
+**Repeated variables within one pattern require structural equality** (Prolog-style): `(a, a)` fails to match `(3, 4)`. Implemented entirely in `matchPat`; trivially flippable. Treated as provisional until a real grammar/semantics pass.
+
+Also provisionally: int and double literals **do not cross-match** (`PInt 1` vs `VDouble 1.0` fails) — the matcher is structural, and mixed-arithmetic promotion (§11.3) is still open and belongs to the action layer anyway.
+
+### 13.3 Natural next steps for the runtime
+
+Roughly in dependency order:
+
+1. **Machine loop / scheduler** (§1, §2): spawn a thread per machine; loop = `inBag` join → evaluate actions → re-arm; empty-pattern machines run once at start; `die`/`quit` terminates the thread. Note the §5 `AContN` chaos falls out of machines looping by default — nothing to build, just don't prevent it.
+2. **Action layer** (§3.3, §7): the verbs (`out`, `lob`, `say`, `exit`, `sleep`, `panic`, `error`, `if`) as post-commit action lists; effect-runner thread with a `TQueue` of bundles (§7.2). Builtins like `rand` land here too.
+3. **Named bags + `lob`** (§6): mostly wiring multiple `RBag`s; cross-bag atomicity is free (one `atomically` spans `TVar`s). Machineless-bag accumulation (§6.2) and the atomic drain-on-first-machine handoff are the interesting bits.
+4. **Program loader**: `Program`/`Decl` AST → runtime wiring; resolve the §11.10 top-level grammar question on the way.
+
