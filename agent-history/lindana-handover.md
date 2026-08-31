@@ -272,7 +272,7 @@ Roughly in order of how foundational they are:
 7. **Effect-runner scope**: one global runner, or multiple (e.g. per-bag)? (§7.3)
 8. **Bytestring lifecycle vs. effect-runner**: do `create`/`destroy` route through the shared effect-runner, or use independent synchronization? (§7.3)
 9. **`die` vs. `quit`** — used interchangeably in discussion; exact keyword not finalized.
-10. **Top-level program grammar**: now that named bags exist, how do multiple `Name { ... }` blocks, `Global`'s implicit initial-tuple literal, and any other bag's initial state compose into one program's file-level syntax? Flagged early, never revisited.
+10. **Top-level program grammar**: now that named bags exist, how do multiple `Name { ... }` blocks, `Global`'s implicit initial-tuple literal, and any other bag's initial state compose into one program's file-level syntax? Flagged early, never revisited. **Provisionally resolved** (§13.6, branch `runtime/named-bags-loader`): a `{ … }` initial block belongs to its nearest enclosing bag — top level is `Global`'s; at most one per bag; nothing else nests (a bag block may not contain another bag block, §6 — sharding is internal, §6.3).
 11. **Bytestring reclamation** — explicitly punted for now (§9); revisit if it matters later.
 
 ---
@@ -339,4 +339,20 @@ Tests: 16 new cases in `test/Lindana/MachineSpec.hs` (loop/one-shot/loop-until-d
 
 3. **Named bags + `lob`** (§6): `rtsBags` already accumulates machineless bags; remaining: machines declared inside a bag match *that* bag (machine declarations need bag scoping), plus the atomic drain-on-first-machine handoff (§6.2) and the `Error` default machine.
 4. **Program loader**: `Program`/`Decl` AST → `MachineDef`s + initial tuples via `runProgram`; resolve §11.10 (top-level grammar) on the way.
+
+### 13.6 Done — named bags + program loader (§6, §13.5 steps 3–4, §11.10), branch `runtime/named-bags-loader`
+
+New module `src/Lindana/Loader.hs`; `src/Lindana/Machine.hs` reworked for bag scoping; `app/Main.hs` now runs programs.
+
+- **Bag scoping (§6)**: `MachineDef` gained `machBag`; machines match the bag whose block declared them (`"Global"` for bare top-level machines). `out` emits into the machine's *own* bag — within a bag it is Linda semantics, and the continuation idiom (`(c!, a + b)`) only works if continuations land where the matching machines are. Cross-bag traffic goes through `lob` exclusively (§6.1): Erlang-style, addressed, one-way.
+- **§6.2 handoff is free here**: a machineless accumulator and a live bag are the /same/ structure (one `TVar [Val]`), so the "atomic drain-on-first-machine handoff" needs no code — tuples accumulated before the bag has machines are already in place when its machines start matching, and nothing can be lost or double-delivered. `bagForSTM` resolves `Global` to the main bag, finds other names in `rtsBags`, or creates them on demand (which is how `lob` makes accumulators). `lob Global` routes to the main bag.
+- **Cross-bag atomicity (§6.1)**: unchanged and free — one `atomically` spans bags; a body mixing same-bag `out` and cross-bag `lob` commits as one unit.
+- **§6.4 default `Error` machine**: the loader appends `(c!) : panic c` (rest capture, §11.1) /iff the program declares no `Error` bag at all/. A user-declared `Error { … }` block — even empty ("silently swallow all errors") — fully replaces it; the default never coexists with a user block. The `error` verb is now `lob Error (…)` proper: the `(Error, …)` tuple lands in the named bag, not `Global`.
+- **Loader (§13.5 step 4)**: `loadProgram :: Program -> Either String Loaded` lowers the AST to bag-tagged `MachineDef`s + per-bag initial tuples, and enforces: single declaration site per bag name; no mixing bare top-level machines with an explicit `Global` block (§6 "pick one style"); no nested bag blocks; at most one initial block per bag. `runLoaded` runs the lowered shape; `runProgram`/`runProgramWith` remain as `Global`-only conveniences.
+- **§11.10 provisionally resolved** (see the list above and the loader's module header): a `{ … }` initial block belongs to its nearest enclosing bag; at most one per bag; bags are flat. Flip-worthy per the house style.
+- **Parser**: a `}` at depth 0 now also terminates a machine — it can only be the closing brace of an enclosing bag block, so one-line `Name { pat : action }` blocks parse. (`endOfMachine` in Parser.hs.)
+- **CLI**: `lindana <file.lind>` parses, loads, and runs, exiting with the program's `exit`/`panic` status; `--parse` keeps the old render-only mode. Load errors (bag rules) print as messages. When every machine is blocked on a match that never arrives (the §1 loop keeping the run alive) the RTS raises `BlockedIndefinitelyOnSTM`; the CLI reports it as the deadlock it is: "every machine is blocked on a match that never arrives; such programs need an exit/die path". (A real shutdown contract for this is still an open §11 question worth adding.)
+- **Examples**: `examples/toy.lind` had a latent pre-runtime bug — `("Print",)` is a 1-tuple containing the /string/ `"Print"`, which the structural matcher rightly refuses to match against the atom pattern `(Print, s)`; fixed to `(Print,)`. New `examples/bags.lind` exercises the whole §6 story (front door, cross-bag lob, machineless `Log` accumulator, user `Error` handler with rest capture, `rd` join clause) and terminates. `throttle.lind` (§8.2) is deliberately non-terminating — the CLI now reports it as a deadlock when it goes fully idle.
+
+Tests: 22 new cases (loader scoping/rules/§11.10, §6.4 default-Error behavior end-to-end via parse→load→run, bag isolation, same-bag `out`, cross-bag `lob` incl. the §6.2 drain, `lob Global`, parser one-line bag blocks) — 75 total green, randomized order, 3× repeat stable. Zero `-Wall` warnings.
 

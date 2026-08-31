@@ -33,14 +33,21 @@
 --     machine.
 --   * Truthiness (§9, open §11): falsy = @VInt 0@, @VDouble 0.0@,
 --     @VAtom \"False\"@; everything else (including @()@) truthy.
---   * @error e@ emits an @(Error, …)@ tuple into the main bag — a
---     degenerate stand-in for @lob Error (…)@ until §6. No default
---     @Error@ machine is installed yet (its pattern needs §11.1
---     rest-capture); unmatched Error tuples simply sit in the bag.
---   * @lob@ to a not-yet-known bag creates it on demand as a
---     machineless accumulator (§6.2). Matching /into/ named bags —
---     machines declared inside @Name { … }@ — is §6 work, deferred
---     with the program loader.
+--   * @error e@ is @lob Error (…)@ proper (§6.4): the @(Error, …)@
+--     tuple lands in the named @Error@ bag. When the program declares
+--     no @Error@ bag of its own, the loader installs the §6.4 default
+--     machine @(c!) : panic c@; a user-declared @Error { … }@ block —
+--     even an empty one, "silently swallow all errors" — fully
+--     replaces it. See "Lindana.Loader".
+--   * Named bags (§6): machines match the bag whose block they are
+--     declared in (@"Global"@ for bare top-level machines); @out@
+--     emits into the machine's /own/ bag; @lob@ is the only cross-bag
+--     send (§6.1). A bag name not seen before is created on demand —
+--     since a machineless accumulator and a live bag are the same
+--     structure here (one 'TVar'), the §6.2 drain-on-first-machine
+--     handoff is free: tuples accumulated before the bag had machines
+--     are simply already in the 'TVar' its machines match against,
+--     and no tuple can be lost or double-delivered.
 --   * @rand@'s seed is a fixed constant: runs are deterministic —
 --     reproducible chaos.
 --   * Shutdown is abrupt: once every machine is done or the program
@@ -54,6 +61,9 @@ module Lindana.Machine
   , defaultHooks
   , newRTS
   , newRTSWith
+  , globalBag
+  , errorBag
+  , bagForSTM
     -- * Machines
   , MachineDef (..)
   , Bundle (..)
@@ -69,6 +79,7 @@ module Lindana.Machine
   , RunResult (..)
   , runProgram
   , runProgramWith
+  , runLoaded
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -91,11 +102,21 @@ import Lindana.Syntax
 -- The RTS
 --------------------------------------------------------------------------------
 
--- | The runtime system: the matchable bag, the effect queue, the
--- @rand@ seed, the live-machine count, the program exit status, and
--- the machineless @lob@ accumulators (§6.2).
+-- | The name of the implicit bag bare top-level machines belong to
+-- (§6). @Global@ effectively acts as the program's front door.
+globalBag :: Name
+globalBag = "Global"
+
+-- | The name of the error bag (§6.4).
+errorBag :: Name
+errorBag = "Error"
+
+-- | The runtime system: @Global@'s matchable bag, the effect queue,
+-- the @rand@ seed, the live-machine count, the program exit status,
+-- and the named bags (§6) — machineless @lob@ accumulators and bags
+-- with machines alike; they are the same structure.
 data RTS = RTS
-  { rtsBag   :: RBag                  -- ^ the (provisionally sole) matchable bag
+  { rtsBag   :: RBag                  -- ^ @Global@'s bag
   , rtsQueue :: TQueue Bundle
   , rtsSeed  :: TVar StdGen           -- ^ @rand@'s state (§8): splitmix
                                       -- via System.Random; pure + fixed
@@ -104,7 +125,9 @@ data RTS = RTS
   , rtsLive  :: TVar Int              -- ^ live machine threads
   , rtsExit  :: TVar (Maybe ExitCode)
   , rtsStop  :: TVar Bool             -- ^ graceful effect-runner shutdown
-  , rtsBags  :: TVar (Map Name RBag)  -- ^ machineless lob accumulators (§6.2)
+  , rtsBags  :: TVar (Map Name RBag)  -- ^ named bags other than @Global@
+                                      --   (§6): machineless accumulators
+                                      --   and live bags alike
   , rtsHooks :: Hooks
   }
 
@@ -139,33 +162,49 @@ newRTSWith hooks = atomically $ do
            , rtsBags = bags, rtsHooks = hooks
            }
 
--- | @lob@ — push into a named bag (§6.1). Runs in the caller's
--- transaction, so a body mixing same-bag @out@ and cross-bag @lob@
--- commits as one atomic unit — cross-bag atomicity for free, exactly
--- as §6.1 predicted. A bag not seen before is created on demand as a
+-- | Resolve a bag name to its 'RBag' (§6). @Global@ is the main bag;
+-- any other name is found in 'rtsBags' or created on demand. On-demand
+-- creation is how @lob@ makes machineless accumulators (§6.2), and it
+-- is why the §6.2 drain-on-first-machine handoff needs no code: an
+-- accumulator and a live bag are the /same/ structure (one 'TVar'),
+-- so tuples accumulated before the bag has machines are already in
+-- place when its machines start matching — the handoff is one 'TVar'
+-- and therefore trivially atomic (nothing can be lost or
+-- double-delivered). Runs in the caller's transaction, so a body
+-- mixing same-bag @out@ and cross-bag @lob@ commits as one atomic
+-- unit — cross-bag atomicity for free, exactly as §6.1 predicted.
+bagForSTM :: RTS -> Name -> STM RBag
+bagForSTM rts n
+  | n == globalBag = pure (rtsBag rts)
+  | otherwise = do
+      bags <- readTVar (rtsBags rts)
+      case Map.lookup n bags of
+        Just b  -> pure b
+        Nothing -> do
+          b <- newBagSTM
+          writeTVar (rtsBags rts) (Map.insert n b bags)
+          pure b
+
+-- | @lob@ — push into a named bag (§6.1): the only way to send across
+-- a bag boundary. A bag not seen before is created on demand as a
 -- machineless accumulator (§6.2): nothing matches against it, so
 -- accumulation is cheap, and any ordering it shows is accidental,
 -- never a promise.
 lobSTM :: RTS -> Name -> Val -> STM ()
 lobSTM rts bagName t = do
-  bags <- readTVar (rtsBags rts)
-  bag <- case Map.lookup bagName bags of
-    Just b  -> pure b
-    Nothing -> do
-      b <- newBagSTM
-      writeTVar (rtsBags rts) (Map.insert bagName b bags)
-      pure b
+  bag <- bagForSTM rts bagName
   outSTM bag t
 
 --------------------------------------------------------------------------------
 -- Machines
 --------------------------------------------------------------------------------
 
--- | A machine definition: join pattern (left) and action list (right).
--- The @Def@ suffix disambiguates from Syntax's @Machine@ Decl
--- constructor.
+-- | A machine definition: the bag it matches in (§6), its join
+-- pattern (left) and action list (right). The @Def@ suffix
+-- disambiguates from Syntax's @Machine@ Decl constructor.
 data MachineDef = MachineDef
-  { machJoin :: [PatElem]
+  { machBag  :: Name        -- ^ bag whose block the machine was declared in
+  , machJoin :: [PatElem]
   , machBody :: [Action]
   } deriving (Eq, Show)
 
@@ -243,14 +282,19 @@ typeTag VTuple{}  = "Tuple"
 -- splices it ahead of the remaining actions — no sequencing
 -- primitives beyond that (Terse desugaring, §5, will lower into this
 -- same action list).
-interpretActions :: RTS -> Env -> [Action] -> STM ([Effect], Bool)
-interpretActions rts env = go []
+-- The bag argument is the machine's own bag (§6): @out@ is same-bag
+-- emission — within a bag it is Linda semantics, and the continuation
+-- idiom (@(c!, a + b)@) only works if the continuation lands where
+-- the matching machines are. Cross-bag traffic goes through @lob@
+-- exclusively (§6.1).
+interpretActions :: RTS -> RBag -> Env -> [Action] -> STM ([Effect], Bool)
+interpretActions rts bag env = go []
   where
     go acc [] = pure (reverse acc, True)
     go acc (act : rest) = case act of
       Out e -> do
         t <- evalR rts env e
-        outSTM (rtsBag rts) t
+        outSTM bag t
         go acc rest
       Lob bagName e -> do
         t <- evalR rts env e
@@ -271,7 +315,8 @@ interpretActions rts env = go []
         pure (reverse (EffPanic v : acc), False)
       Raise e -> do
         t <- evalR rts env e
-        outSTM (rtsBag rts) (errorTuple t)
+        ebag <- bagForSTM rts errorBag
+        outSTM ebag (errorTuple t)
         go acc rest
       If c th el -> do
         b <- truthy <$> evalR rts env c
@@ -282,9 +327,11 @@ interpretActions rts env = go []
       VDouble d -> EffSleep (round (d * 1000))
       _ -> error "sleep: non-numeric operand (action-layer check, §3.3)"
 
--- | @error e@ — degenerate named-bag stand-in (§6.4): emit an
--- @(Error, …)@ tuple into the main bag; a tuple argument's contents
--- are spliced in (provisional shape; the real thing is @lob Error …@).
+-- | @error e@ (§6.4): an @(Error, …)@ tuple into the named @Error@
+-- bag (conceptually sugar over @lob Error …@); a tuple argument's
+-- contents are spliced in. With no user @Error@ declarations the
+-- loader installs the default machine @(c!) : panic c@; an empty
+-- user @Error { }@ block means "silently swallow all errors".
 errorTuple :: Val -> Val
 errorTuple v = VTuple (VAtom "Error" : case v of
   VTuple vs -> vs
@@ -307,21 +354,22 @@ truthy _               = True
 -- interpret → re-arm. @die@ (or terminal @exit@\/@panic@) ends the
 -- thread; an empty-pattern machine runs once, unconditionally, at
 -- start (§1).
-machineThread :: RTS -> MachineDef -> IO ()
-machineThread rts m = go `finally` decLive
+machineThread :: RTS -> RBag -> MachineDef -> IO ()
+machineThread rts bag m = go `finally` decLive
   where
     decLive = atomically (modifyTVar' (rtsLive rts) (subtract 1))
 
     go
       | null (machJoin m) = do   -- §1: one-shot, unconditionally, at start
-          (effs, _) <- atomically (interpretActions rts Map.empty (machBody m))
+          (effs, _) <- atomically
+            (interpretActions rts bag Map.empty (machBody m))
           push effs
           pure ()                -- implicitly terminates after firing
       | otherwise = loop
 
     loop = do
       (effs, survived) <- atomically $ do
-        mr <- matchJoinSTM (rtsBag rts) (machJoin m)
+        mr <- matchJoinSTM bag (machJoin m)
         case mr of
           Nothing -> retry
           Just mt ->
@@ -330,7 +378,7 @@ machineThread rts m = go `finally` decLive
             -- transaction so its tuple-space writes land atomically
             -- with the match (the §8.2 note); irrevocables come back
             -- as a deferred bundle for the effect-runner (§7.2).
-            interpretActions rts (matchEnv mt) (machBody m)
+            interpretActions rts bag (matchEnv mt) (machBody m)
       push effs
       when survived loop
 
@@ -425,28 +473,55 @@ exitCodeOf _ = ExitFailure 1
 
 data RunResult = RunResult
   { rrExit :: ExitCode        -- ^ program exit status (@exit@\/@panic@)
-  , rrBag  :: [Val]           -- ^ final contents of the main bag
-  , rrBags :: Map Name [Val]  -- ^ machineless lob accumulators (§6.2)
+  , rrBag  :: [Val]           -- ^ final contents of @Global@
+  , rrBags :: Map Name [Val]  -- ^ final contents of every other named
+                              --   bag (§6): machineless accumulators
+                              --   and live bags alike
   } deriving (Eq, Show)
 
--- | Run a program: initial tuples (evaluated with builtins available)
--- land in the bag in one transaction, then one thread per machine.
+-- | Run a @Global@-only program: initial tuples land in @Global@ in
+-- one transaction, then one thread per machine. Convenience for tests
+-- and callers that have not crossed into named bags (§6); the loader
+-- ('Lindana.Loader.loadProgram') produces the general shape.
 -- Returns when every machine has terminated (die, one-shot, or
 -- exception) or the program has exited. A machine blocked on a match
 -- that will never arrive keeps the count up — that is the §1 loop
 -- doing its job, not a bug; such programs need @exit@ or @die@ paths
 -- (or an external watchdog) to finish.
 runProgram :: [MachineDef] -> [Expr] -> IO RunResult
-runProgram = runProgramWith defaultHooks
+runProgram machines initial =
+  runProgramWith defaultHooks machines (Map.singleton globalBag initial)
 
-runProgramWith :: Hooks -> [MachineDef] -> [Expr] -> IO RunResult
-runProgramWith hooks machines initial = do
+runProgramWith :: Hooks -> [MachineDef] -> Map Name [Expr] -> IO RunResult
+runProgramWith hooks machines initial =
+  runLoaded hooks machines initial
+
+-- | Run a loaded program (§6): one thread per machine, each matching
+-- the bag its 'MachineDef' names; initial tuples land per bag. Bags
+-- are resolved (and created on demand) through 'bagForSTM', so a
+-- machine's bag and any @lob@ target with the same name are the same
+-- structure.
+runLoaded :: Hooks -> [MachineDef] -> Map Name [Expr] -> IO RunResult
+runLoaded hooks machines initial = do
   rts <- newRTSWith hooks
   atomically $ do
-    mapM_ (\e -> evalR rts Map.empty e >>= outSTM (rtsBag rts)) initial
+    mapM_ (\(n, es) ->
+              mapM_ (\e -> do
+                       v <- evalR rts Map.empty e
+                       b <- bagForSTM rts n
+                       outSTM b v)
+                 es)
+          (Map.toList initial)
     writeTVar (rtsLive rts) (length machines)
+  -- Resolve each machine's bag up front: the bag is fixed for the
+  -- machine's lifetime (its declaration site named it), and resolving
+  -- once keeps the loop from re-reading the bag map on every re-arm.
+  mbags <- mapM (\m -> do
+                    b <- atomically (bagForSTM rts (machBag m))
+                    pure (m, b))
+                machines
   runner <- async (effectRunner rts)
-  mths   <- mapM (async . machineThread rts) machines
+  mths   <- mapM (\(m, b) -> async (machineThread rts b m)) mbags
   atomically $ do
     live <- readTVar (rtsLive rts)
     ex   <- readTVar (rtsExit rts)

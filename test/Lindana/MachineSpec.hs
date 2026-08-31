@@ -38,7 +38,13 @@ int :: Integer -> Expr
 int = EInt
 
 machine :: [PatElem] -> [Action] -> MachineDef
-machine = MachineDef
+machine = MachineDef globalBag
+
+-- | Run with hooks, all initial tuples in @Global@ (the pre-§6
+-- shape the older tests were written against).
+runGlobal :: Hooks -> [MachineDef] -> [Expr] -> IO RunResult
+runGlobal hooks ms tuples =
+  runProgramWith hooks ms (Map.singleton globalBag tuples)
 
 -- | A single-element tuple pattern @\"Tag\"@ as @('Tag',)@.
 p1 :: Name -> Pat
@@ -137,7 +143,7 @@ spec = do
       (hooks, said, _) <- captureHooks
       let m = machine (take1 (p1 "Go"))
             [ Say "first" [], Sleep (int 5), Say "second" [], Die ]
-      _ <- runProgramWith hooks [m] [t [EAtom "Go"]]
+      _ <- runGlobal hooks [m] [t [EAtom "Go"]]
       output <- readIORef said
       reverse output `shouldBe` ["first", "second"]
 
@@ -145,7 +151,7 @@ spec = do
       (hooks, said, _) <- captureHooks
       let m = machine (take1 (p1 "Go"))
             [ Say "before" [], Die, Say "after" [] ]
-      _ <- runProgramWith hooks [m] [t [EAtom "Go"]]
+      _ <- runGlobal hooks [m] [t [EAtom "Go"]]
       output <- readIORef said
       reverse output `shouldBe` ["before"]
 
@@ -153,7 +159,7 @@ spec = do
       (hooks, said, _) <- captureHooks
       let m = machine (take1 (p1 "Go"))
             [ Out (t [EAtom "Marked"]), Sleep (int 50), Say "late" [], Die ]
-      r <- runProgramWith hooks [m] [t [EAtom "Go"]]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrBag r `shouldSatisfy` elem (VTuple [VAtom "Marked"])
       output <- readIORef said
       reverse output `shouldBe` ["late"]
@@ -162,7 +168,7 @@ spec = do
       (hooks, said, _) <- captureHooks
       let m = machine (take1 (PTuple [a "Go", v "n", v "s"]))
             [ Say "n is %i, s is %s" [EVar "n", EVar "s"], Die ]
-      _ <- runProgramWith hooks [m]
+      _ <- runGlobal hooks [m]
              [t [EAtom "Go", int 42, EStr "hi"]]
       output <- readIORef said
       reverse output `shouldBe` ["n is 42, s is hi"]
@@ -183,7 +189,7 @@ spec = do
     it "panic is fatal and reports via the panic hook (§6.4)" $ do
       (hooks, _, panics) <- captureHooks
       let m = machine (take1 (p1 "Go")) [Panic (t [EAtom "Bad", int 1])]
-      r <- runProgramWith hooks [m] [t [EAtom "Go"]]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrExit r `shouldBe` ExitFailure 1
       msgs <- readIORef panics
       reverse msgs `shouldBe` ["(Bad, 1)"]
@@ -193,12 +199,72 @@ spec = do
       r <- timeout 150000 (runProgram [blocked] [])
       r `shouldBe` Nothing
 
-  describe "error verb (§6.4, degenerate pre-§6 form)" $ do
-    it "fires an (Error, …) tuple into the bag" $ do
+  describe "error verb (§6.4)" $ do
+    it "fires an (Error, …) tuple into the named Error bag, not Global" $ do
+      -- No Error machine here: the tuple simply sits in the Error bag
+      -- (the default machine is the loader's business — LoaderSpec).
       let m = machine (take1 (p1 "Boom"))
             [ Raise (t [EAtom "Bad", int 7]), Die ]
       r <- runProgram [m] [t [EAtom "Boom"]]
-      rrBag r `shouldBe` [VTuple [VAtom "Error", VAtom "Bad", VInt 7]]
+      rrExit r `shouldBe` ExitSuccess
+      rrBag r `shouldBe` []
+      Map.lookup "Error" (rrBags r) `shouldBe`
+        Just [VTuple [VAtom "Error", VAtom "Bad", VInt 7]]
+
+  describe "named bags (§6)" $ do
+    it "a machine only matches the bag whose block declared it" $ do
+      -- (Work,) lands in bag W, not Global: the Global machine never
+      -- fires, the W machine does. Bags isolate (§6 split). The W
+      -- machine exits — a machine blocked forever on a tuple another
+      -- bag consumed is exactly the isolation being tested, and the
+      -- §1 loop would otherwise keep the run alive (correctly).
+      let globalM = machine (take1 (p1 "Work")) [Out (t [EAtom "GlobalFired"]), Die]
+          wM      = MachineDef "W" (take1 (p1 "Work"))
+                      [Out (t [EAtom "WFired"]), Exit (int 0)]
+      r <- runLoaded defaultHooks [globalM, wM]
+             (Map.fromList [("W", [t [EAtom "Work"]]),
+                            (globalBag, [t [EAtom "Unrelated"]])])
+      rrExit r `shouldBe` ExitSuccess
+      rrBag r `shouldSatisfy` elem (VTuple [VAtom "Unrelated"])
+      rrBag r `shouldNotSatisfy` elem (VTuple [VAtom "GlobalFired"])
+      Map.lookup "W" (rrBags r) `shouldBe` Just [VTuple [VAtom "WFired"]]
+
+    it "out emits into the machine's own bag (continuations stay home)" $ do
+      -- Two workers in bag W hand off via bare out; Global never sees it.
+      let w1 = MachineDef "W" (take1 (p1 "Ping")) [Out (t [EAtom "Pong"]), Die]
+          w2 = MachineDef "W" (take1 (p1 "Pong")) [Out (t [EAtom "Done"]), Die]
+      r <- runLoaded defaultHooks [w1, w2] (Map.singleton "W" [t [EAtom "Ping"]])
+      rrBag r `shouldBe` []
+      Map.lookup "W" (rrBags r) `shouldBe` Just [VTuple [VAtom "Done"]]
+
+    it "lob crosses bags: Global machine feeds a named bag's machine (§6.1, §6.2 drain)" $ do
+      -- The tuple is lob'd before W's machine ever matches: the §6.2
+      -- handoff must not lose it. out+lob in one body commit atomically.
+      let feeder = machine (take1 (p1 "Go"))
+            [ Out (t [EAtom "Fed"]), Lob "W" (t [EAtom "Work", int 3]), Die ]
+          worker = MachineDef "W" (take1 (PTuple [a "Work", v "n"]))
+            [ Out (t [EAtom "Got", EVar "n"]), Die ]
+      r <- runLoaded defaultHooks [feeder, worker]
+             (Map.singleton globalBag [t [EAtom "Go"]])
+      rrExit r `shouldBe` ExitSuccess
+      Map.lookup "W" (rrBags r) `shouldBe`
+        Just [VTuple [VAtom "Got", VInt 3]]
+      rrBag r `shouldBe` [VTuple [VAtom "Fed"]]
+
+    it "a machineless bag accumulates without any machine existing yet (§6.2)" $ do
+      -- §6.2: lob into a bag nobody matches — cheap accumulation, no
+      -- machines needed for it to exist.
+      let m = machine (take1 (p1 "Go"))
+            [ Lob "Log" (t [EAtom "Bar"]), Die ]
+      r <- runLoaded defaultHooks [m] (Map.singleton globalBag [t [EAtom "Go"]])
+      Map.lookup "Log" (rrBags r) `shouldBe` Just [VTuple [VAtom "Bar"]]
+
+    it "lob Global routes to the main bag" $ do
+      let m = machine (take1 (p1 "Go")) [Lob globalBag (t [EAtom "Home"]), Die]
+      r <- runProgram [m] [t [EAtom "Go"]]
+      Map.lookup globalBag (rrBags r) `shouldBe` Nothing
+      -- The match consumed (Go,); what is left is the lob'd (Home,).
+      rrBag r `shouldBe` [VTuple [VAtom "Home"]]
 
   describe "builtins (action layer, §3.3)" $ do
     it "typeOf yields the type atoms (§4)" $ do
@@ -263,7 +329,7 @@ spec = do
       (hooks, said, _) <- captureHooks
       let m = machine (take1 (p1 "Go"))
             [ Out (t [EAtom "Marked"]), Sleep (int 40), Say "after-slept" [], Die ]
-      r <- runProgramWith hooks [m] [t [EAtom "Go"]]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple [VAtom "Marked"]]
       output <- readIORef said
       reverse output `shouldBe` ["after-slept"]

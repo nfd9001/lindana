@@ -1,0 +1,29 @@
+-- §6 named bags end-to-end, in the implicit-Global style: bare
+-- machines belong to Global, the front door (§6's convention); work
+-- is lobbed into the Workers bag; Log is a machineless accumulator
+-- (§6.2) — a free logging sink; Error is declared with its own
+-- handler, which fully replaces the §6.4 default @(c!) : panic c@ and
+-- uses §11.1 rest capture.
+--
+-- Every machine ends in die: a looping machine blocked on a match
+-- that never arrives keeps the program alive (§1).
+{
+  (Job, 3)
+}
+
+(Job, n) :
+  [lob Workers (Compute, n, (Done,)); lob Log ("dispatched", n); die]
+
+Workers {
+  {
+    (Salary, 10)
+  }
+  (Compute, n, c), rd(Salary, rate) : [(c!, n * rate); die]
+  (Done, x) : [say "job paid: %i" x; error ("late", x); die]
+}
+
+Log { }
+
+Error {
+  (Error, rest!) : [say "error handler: %a" rest; die]
+}

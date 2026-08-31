@@ -1,5 +1,5 @@
 {
-  (Add, 1, 2, ("Print",))
+  (Add, 1, 2, (Print,))
 }
 
 (Add, a, b, c) : (c!, a + b)

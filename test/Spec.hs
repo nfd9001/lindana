@@ -11,6 +11,7 @@ import Test.Hspec
 
 import Lindana.Parser (parseProgram)
 import Lindana.MachineSpec (spec)
+import qualified Lindana.LoaderSpec as LoaderSpec
 import qualified Lindana.RuntimeSpec as RuntimeSpec
 import Lindana.Syntax (Program, progDecls, renderProgram)
 import Text.Megaparsec.Error (errorBundlePretty)
@@ -87,7 +88,13 @@ main = hspec $ do
 
     it "rejects rest-capture on a non-variable (§11.1: var-only)" $
       parseProgram "(Foo!) : die" `shouldSatisfy` isLeft
+
+    it "parses a one-line bag block (§6): } ends the machine" $ do
+      roundTrips "W { (Ping,) : die }" `shouldBe` True
+      p <- parseOk "W { (Ping,) : die }\n(Tick,) : die"
+      progDecls p `shouldHaveLength` 2
   spec
+  LoaderSpec.spec
   RuntimeSpec.spec
   where
     shouldHaveLength xs n = length xs `shouldBe` n
