@@ -1,5 +1,0 @@
-{ 
-    (Go)
-}
-(Go) : [say "Hello world!"; (Stop, 0)]
-(Stop, c) : if c then [say "Error, closing"; exit c] else [exit c]

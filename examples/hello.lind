@@ -1,6 +1,2 @@
--- The issue #7 Hello World: a no-LHS machine (§1 one-shot) runs once,
--- unconditionally, at program start, emits (Stop, 0), and the Stop
--- machine exits cleanly. The one-shot form is `:` at the start of a
--- line — an empty join pattern.
 : [say "Hello world!"; (Stop, 0)]
 (Stop, c) : if c then [say "Error, closing"; exit c] else [exit c]
