@@ -3,8 +3,11 @@
 -- the rendered output yields an equal AST).
 --
 -- This is a shell: syntax is illustrative pending the real grammar pass
--- (see lindana-handover.md §4). Not modelled yet: list/cons sugar,
--- Terse->Restricted desugaring, effect bundles.
+-- (see lindana-handover.md §4). Not modelled yet: Terse->Restricted
+-- desugaring, effect bundles. List/cons sugar (§11.5, provisional) is
+-- not an AST node: the parser desugars @[a, b, c]@ to nested 2-tuples
+-- ending in the @Nil@ atom (and @[]@ to @Nil@) at parse time, so the
+-- pretty-printer renders the desugared tuple form — which round-trips.
 module Lindana.Syntax
   ( -- * AST
     Name

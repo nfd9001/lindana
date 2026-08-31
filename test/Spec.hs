@@ -13,7 +13,10 @@ import Lindana.Parser (parseProgram)
 import Lindana.MachineSpec (spec)
 import qualified Lindana.LoaderSpec as LoaderSpec
 import qualified Lindana.RuntimeSpec as RuntimeSpec
-import Lindana.Syntax (Program, progDecls, renderProgram)
+import Lindana.Syntax
+  ( Action (..), Decl (..), Expr (..), Pat (..), PatElem (..)
+  , ReadMode (..), Program, progDecls, renderProgram
+  )
 import Text.Megaparsec.Error (errorBundlePretty)
 
 -- The §8.2 self-throttling example from the handover, verbatim.
@@ -93,6 +96,43 @@ main = hspec $ do
       roundTrips "W { (Ping,) : die }" `shouldBe` True
       p <- parseOk "W { (Ping,) : die }\n(Tick,) : die"
       progDecls p `shouldHaveLength` 2
+
+    -- §11.5 list/cons sugar (provisional): literals and patterns are
+    -- parse-time sugar over nested 2-tuples with the Nil sentinel atom;
+    -- the AST has no list nodes, so rendering shows the desugared form
+    -- (still round-trip friendly).
+    describe "list/cons sugar (§11.5)" $ do
+      let cons h t = ETuple [h, t]
+          nil = EAtom "Nil"
+      it "desugars a literal to nested 2-tuples ending in Nil" $ do
+        p <- parseOk "{ ([1, 2, 3],) }"
+        progDecls p `shouldBe`
+          [Initial [ETuple [cons (EInt 1) (cons (EInt 2) (cons (EInt 3) nil))]]]
+      it "desugars [] to Nil" $ do
+        p <- parseOk "{ ([]) }"
+        progDecls p `shouldBe` [Initial [ETuple [nil]]]
+      it "conses onto an arbitrary tail with [h | t]" $ do
+        p <- parseOk "{ ([a, b | t],) }"
+        progDecls p `shouldBe`
+          [Initial [ETuple [cons (EVar "a") (cons (EVar "b") (EVar "t"))]]]
+      it "desugars a pattern [h | t] to a 2-tuple pattern" $ do
+        p <- parseOk "([h | t],) : die"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PTuple [PVar "h", PVar "t"]])] [Die]]
+      it "desugars the empty pattern [] to Nil" $ do
+        p <- parseOk "([],) : die"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PAtom "Nil"])] [Die]]
+      it "allows multi-head patterns [a, b | t]" $ do
+        p <- parseOk "([a, b | t],) : die"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PTuple [PVar "a", PTuple [PVar "b", PVar "t"]]])] [Die]]
+      it "nests: lists of lists" $ do
+        p <- parseOk "{ ([[1], []],) }"
+        progDecls p `shouldBe`
+          [Initial [ETuple [cons (cons (EInt 1) nil) (cons nil nil)]]]
+      it "round-trips through the pretty-printer (rendered as the desugared tuples)" $
+        roundTrips "{ ([1, 2, 3],) }\n([],) : die" `shouldBe` True
 
     it "parses a no-LHS machine (§1 one-shot): the issue #7 Hello World" $ do
       p <- parseOk $ T.unlines

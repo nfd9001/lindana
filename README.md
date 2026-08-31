@@ -47,7 +47,8 @@ Git history might be a better source-of-truth about recent progress until I've e
   matcher, machine loop, effects, bags, loader.
 - `examples/` — sample `.lind` files. `hello.lind` is the issue #7
   no-LHS one-shot Hello World; `bags.lind` exercises named
-  bags end-to-end; `throttle.lind` (§8.2) is a deliberately
+  bags end-to-end; `lists.lind` (§11.5) sums a list via cons-pattern
+  sugar; `throttle.lind` (§8.2) is a deliberately
   non-terminating long-runner — the CLI reports it as a deadlock when
   every machine ends up blocked.
 
@@ -78,13 +79,17 @@ ghci> fmap renderProgram (parseProgram "(Tick,), (ResetEpoch, n) : (ResetEpoch, 
 
 Implemented: machines (including no-LHS one-shot machines, §1: `:` at
 the start of a line), join patterns with `rd`/`in`, tuples with `!`
-splice, Terse bracketed sequences `[a; b]`, `if/then/else`, verbs
+splice, list/cons sugar (§11.5, provisional: `[a, b, c]` literals and
+`[h | t]` patterns desugar at parse time to nested 2-tuples ending in
+the `Nil` atom — rendering shows the desugared form), Terse bracketed
+sequences `[a; b]`, `if/then/else`, verbs
 (`say`, `exit`, `die`/`quit`, `sleep`, `lob`, `error`, `panic`),
 builtin calls (`rand`, `typeOf`, `atomize`, `atos`), initial-bag
 blocks, named bag blocks.
 
-Not yet (handover §11): list/cons sugar,
-string sugar beyond literals, effect bundles. Provisional (flip
+Not yet (handover §11): string sugar beyond literals,
+effect bundles. Provisional (flip
 worthy): pattern-side rest capture is trailing-only (§11.1), the
+list/cons sugar desugaring (§11.5), the
 §11.10 top-level grammar (see the loader's header), and the §6.4
 default-`Error`-machine installation rule.

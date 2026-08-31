@@ -9,10 +9,15 @@
 -- permitted after the structural separators @:@, @then@ and @else@ so
 -- multi-line Terse machines like the §8.2 throttling example parse.
 --
--- Deliberately not yet implemented (open questions §11): list
--- literal/pattern sugar, effect bundles. No-LHS machines (§1
--- one-shots) are supported: @: actions@ parses as a machine with an
--- empty join pattern.
+-- Deliberately not yet implemented (open questions §11): effect
+-- bundles. No-LHS machines (§1 one-shots) are supported: @: actions@
+-- parses as a machine with an empty join pattern.
+--
+-- List/cons sugar (§11.5, provisionally resolved) is desugared at
+-- parse time: @[a, b, c]@ is nested 2-tuples ending in the @Nil@ atom,
+-- @[h | t]@ conses onto an arbitrary tail expression/pattern, @[]@ is
+-- @Nil@. Purely syntactic — the AST has no list nodes, so the
+-- pretty-printer renders the desugared tuple form (which round-trips).
 module Lindana.Parser
   ( parseProgram
   , PError
@@ -23,7 +28,7 @@ import qualified Control.Monad.State.Strict as St
 import Control.Monad.Trans.Class (lift)
 import Data.Char (digitToInt)
 import Data.List (foldl')
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Void (Void)
 import Text.Megaparsec
@@ -182,13 +187,31 @@ endOfMachine = try (ws >> char '\n' >> ws >> skipLines)
 
 patternP :: Parser Pat
 patternP = choice
-  [ tuplePat
+  [ listPat
+  , tuplePat
   , PAtom   <$> atomIdent
   , PVar    <$> varIdent
   , PDouble <$> doubleLit
   , PInt    <$> intLit
   , PStr    <$> stringLit
   ]
+
+-- | List/cons pattern sugar (§11.5, provisional): @[p1, p2 | t]@
+-- desugars to @(p1, (p2, t))@, @[]@ to the @Nil@ atom. Elements are
+-- plain patterns — rest-capture @var!@ is a tuple-level concept (the
+-- cons tail @| t@ is the list-shaped way to bind the remainder).
+listPat :: Parser Pat
+listPat = grouped '[' ']' $ do
+  mhs <- optional elems
+  pure (mk mhs)
+  where
+    elems = do
+      hs <- patternP `sepBy1` symbolT ","
+      mt <- optional (symbolT "|" *> patternP)
+      pure (hs, mt)
+    mk Nothing                  = PAtom "Nil"
+    mk (Just (hs, mt)) =
+      foldr (\p acc -> PTuple [p, acc]) (fromMaybe (PAtom "Nil") mt) hs
 
 -- | Tuple pattern. A trailing comma marks arity, e.g. @(Tick,)@;
 -- @()@ is the empty tuple. An element followed by @!@ is a rest
@@ -251,6 +274,7 @@ primP :: Parser Expr
 primP = choice
   [ callP
   , parenExpr
+  , listExpr
   , EStr    <$> stringLit
   , EDouble <$> doubleLit
   , EInt    <$> intLit
@@ -299,6 +323,23 @@ tupleElem = do
 tupleExpr :: Parser Expr
 tupleExpr =
   ETuple <$> grouped '(' ')' (tupleElem `sepEndBy` symbolT ",")
+
+-- | List/cons literal sugar (§11.5, provisional): @[e1, e2, e3]@
+-- desugars to @(e1, (e2, (e3, Nil)))@, @[h | t]@ conses onto an
+-- arbitrary tail expression, @[]@ is the @Nil@ atom. Elements are
+-- tuple elements (so @!@ splice works), same as in tuples.
+listExpr :: Parser Expr
+listExpr = grouped '[' ']' $ do
+  mhs <- optional elems
+  pure (mk mhs)
+  where
+    elems = do
+      hs <- tupleElem `sepBy1` symbolT ","
+      mt <- optional (symbolT "|" *> tupleElem)
+      pure (hs, mt)
+    mk Nothing                  = EAtom "Nil"
+    mk (Just (hs, mt)) =
+      foldr (\e acc -> ETuple [e, acc]) (fromMaybe (EAtom "Nil") mt) hs
 
 --------------------------------------------------------------------------------
 -- Actions
