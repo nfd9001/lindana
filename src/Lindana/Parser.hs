@@ -166,8 +166,13 @@ sepKw :: Text -> Parser ()
 sepKw w = skipLines >> rword w >> skipLines
 
 -- | A machine ends at end-of-line (or EOF). Only reachable at depth 0.
+-- A @}@ at depth 0 also ends a machine — it can only be the closing
+-- brace of an enclosing bag block (@Name { (Ping,) : die }@ on one
+-- line); the block's own parser consumes it next.
 endOfMachine :: Parser ()
-endOfMachine = try (ws >> char '\n' >> ws >> skipLines) <|> (ws >> eof)
+endOfMachine = try (ws >> char '\n' >> ws >> skipLines)
+           <|> try (ws >> void (lookAhead (char '}')))
+           <|> (ws >> eof)
 
 --------------------------------------------------------------------------------
 -- Patterns

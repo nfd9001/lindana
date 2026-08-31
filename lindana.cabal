@@ -9,6 +9,7 @@ library
                       Lindana.Parser
                       Lindana.Runtime
                       Lindana.Machine
+                      Lindana.Loader
     hs-source-dirs:   src
     build-depends:    base >=4.14 && <5
                     , text
@@ -37,6 +38,7 @@ test-suite lindana-test
     main-is:          Spec.hs
     other-modules:    Lindana.RuntimeSpec
                       Lindana.MachineSpec
+                      Lindana.LoaderSpec
     hs-source-dirs:   test
     build-depends:    base
                     , text
