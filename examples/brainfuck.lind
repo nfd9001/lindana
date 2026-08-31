@@ -1,0 +1,140 @@
+-- A Brainfuck interpreter, as a stress test of the §9/§11.5 cons-list
+-- world: a program is a casual string, the tape and the jump table are
+-- cons-lists, and the whole interpreter is ordinary machines racing
+-- over one evolving state tuple.
+--
+-- Shape of it:
+--
+--   * Scan   — one init pass over the source literal: builds the
+--              bracket jump table (pairs of positions) and the
+--              program as a list (accumulated reversed).
+--   * Rev    — one generic list-reversal machine, CPS-style: its last
+--              slot is a continuation tuple spliced back in with `!`
+--              (§4) when the walk bottoms out. The same Rev serves
+--              both "un-reverse the scanned program" (→ BfInit) and
+--              "un-reverse the output" (→ Fin).
+--   * Bf     — the stepper. The program is a zipper: Before holds the
+--              executed prefix reversed, After the rest; the
+--              instruction under the head of After is the one that
+--              runs. Dispatcher machines are keyed on that instruction
+--              character, so all of them watch the same tuple and
+--              never overlap — one state tuple in the bag, one
+--              machine fires. The tape is the classic zipper
+--              (left-reverse, current, right) — and because an empty
+--              side just conses a fresh 0 cell, the tape is lazy and
+--              unbounded in BOTH directions for free (documented
+--              hazard, not guarded: a runaway `[<]`/`[>]` scan now
+--              allocates forever instead of hitting an edge).
+--   * Jumps  — FindF/FindB walk the jump table comparing with `==`;
+--              MoveF/MoveB then shuffle the program zipper by a
+--              counter. Both use ONE rule with the base case decided
+--              by `if` in the body: a "base-case rule + general rule"
+--              pair would be two overlapping patterns — a genuine
+--              §3.1 race over the counter, and at n == 1 either could
+--              win. The matcher only checks structure (§3.2), so the
+--              branch, not the pattern, is where the decision lives.
+--   * ip     — the absolute position threads through every step
+--              (Before's length, but cheaper to carry), which is what
+--              the jump-table lookup keys on.
+--
+-- Not supported: `,` (no stdin verb) and comment characters — a
+-- program containing either deadlocks the matching machine, which the
+-- CLI reports. Stripping comments would need a non-racing catch-all
+-- pattern, which the matcher deliberately doesn't have. The sample
+-- program below is the classic input-free "Hello World!".
+
+{ (Src, "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.") }
+
+-- init: kick off the scan with position 0, empty pair table, empty
+-- reversed-program accumulator, empty bracket stack
+(Src, cs) : (Scan, 0, cs, [], [], [])
+
+(Scan, ip, ['[' | rest], cs, ps, st) :
+  (Scan, ip + 1, rest, ['[' | cs], ps, [ip | st])
+(Scan, ip, [']' | rest], cs, ps, [p | st]) :
+  (Scan, ip + 1, rest, [']' | cs], [(p, ip) | ps], st)
+(Scan, ip, [']' | rest], cs, ps, []) :
+  error ("bf", "unmatched ] in program at", ip)
+(Scan, ip, ['+' | rest], cs, ps, st) : (Scan, ip + 1, rest, ['+' | cs], ps, st)
+(Scan, ip, ['-' | rest], cs, ps, st) : (Scan, ip + 1, rest, ['-' | cs], ps, st)
+(Scan, ip, ['<' | rest], cs, ps, st) : (Scan, ip + 1, rest, ['<' | cs], ps, st)
+(Scan, ip, ['>' | rest], cs, ps, st) : (Scan, ip + 1, rest, ['>' | cs], ps, st)
+(Scan, ip, ['.' | rest], cs, ps, st) : (Scan, ip + 1, rest, ['.' | cs], ps, st)
+
+-- source exhausted: the table ships as-is (lookup walks it, so pair
+-- order is irrelevant); the program needs one reversal. The leftover
+-- error uses a cons pattern, NOT st! — a rest capture matches
+-- zero-or-more elements, so st! would also match the clean empty-stack
+-- state and race the success rule (§3.1).
+(Scan, ip, [], cs, ps, []) : [(Table, ps); (Rev, cs, [], (BfInit,))]
+(Scan, ip, [], cs, ps, [p | st]) :
+  error ("bf", "unmatched [ in program at", ip)
+
+-- generic reversal with a spliced-in continuation (k rides as a
+-- plain value; only the bottom rule splices it — capturing it with
+-- k! instead would wrap it in a PRest sub-tuple and double-wrap the
+-- continuation)
+(Rev, [h | t], acc, k) : (Rev, t, [h | acc], k)
+(Rev, [], acc, k) : (k!, acc)
+
+-- the stepper's state: (Bf, ip, cur, before, after, left, right, out)
+-- — before and the tape's left side are stored reversed; out
+-- accumulates reversed and Rev straightens it at halt
+(BfInit, prog) : (Bf, 0, 0, [], prog, [], [], [])
+
+(Bf, ip, cur, b, ['+' | a], l, r, o) :
+  (Bf, ip + 1, cur + 1, ['+' | b], a, l, r, o)
+(Bf, ip, cur, b, ['-' | a], l, r, o) :
+  (Bf, ip + 1, cur - 1, ['-' | b], a, l, r, o)
+(Bf, ip, cur, b, ['.' | a], l, r, o) :
+  (Bf, ip + 1, cur, ['.' | b], a, l, r, [cur | o])
+
+-- `>` / `<`: pop the neighbour cell, or mint a fresh 0 when the zipper
+-- side is empty — that case IS the unbounded tape
+(Bf, ip, cur, b, ['>' | a], l, [x | r2], o) :
+  (Bf, ip + 1, x, ['>' | b], a, [cur | l], r2, o)
+(Bf, ip, cur, b, ['>' | a], l, [], o) :
+  (Bf, ip + 1, 0, ['>' | b], a, [cur | l], [], o)
+(Bf, ip, cur, b, ['<' | a], [y | l2], r, o) :
+  (Bf, ip + 1, y, ['<' | b], a, l2, [cur | r], o)
+(Bf, ip, cur, b, ['<' | a], [], r, o) :
+  (Bf, ip + 1, 0, ['<' | b], a, [], [cur | r], o)
+
+-- brackets consult the jump table (rd: it stays for every firing);
+-- cur decides direction in the branch, not the pattern — see header
+(Bf, ip, cur, b, ['[' | a], s!), rd(Table, t) :
+  if cur != 0 then [(Bf, ip + 1, cur, ['[' | b], a, s!)]
+  else [(FindF, ip, t, cur, b, a, s!)]
+-- brackets consult the jump table (rd: it stays for every firing);
+-- cur decides direction in the branch, not the pattern — see header.
+-- The back branch conses ']' onto Before: the dispatcher has consumed
+-- it, and a loop's closing bracket must still be in the program list
+-- when an outer iteration comes around (see FindB below)
+(Bf, ip, cur, b, [']' | a], s!), rd(Table, t) :
+  if cur != 0 then [(FindB, ip, t, cur, [']' | b], a, s!)]
+  else [(Bf, ip + 1, cur, [']' | b], a, s!)]
+
+-- walk the table for the pair this bracket keys on; the spliced state
+-- rides along untouched
+(FindF, ip, [(p, q) | m], cur, b, a, s!) :
+  if p == ip then [(MoveF, q - ip, q + 1, cur, ['[' | b], a, s!)]
+  else [(FindF, ip, m, cur, b, a, s!)]
+-- back-jump: the dispatcher has already consed ']' onto Before (the
+-- closing bracket must survive — an outer loop may re-enter it), so
+-- the moved span is ip - p + 1 chars, landing the ']' back at ip
+(FindB, ip, [(p, q) | m], cur, b, a, s!) :
+  if q == ip then [(MoveB, ip - p + 1, p, cur, b, a, s!)]
+  else [(FindB, ip, m, cur, b, a, s!)]
+
+-- shuffle the program zipper across the skipped span; the base case
+-- (n == 1, the char that lands us on the target) is the else branch
+(MoveF, n, ipn, cur, b, [x | a], s!) :
+  if n != 1 then [(MoveF, n - 1, ipn, cur, [x | b], a, s!)]
+  else [(Bf, ipn, cur, [x | b], a, s!)]
+(MoveB, n, ipn, cur, [x | b], a, s!) :
+  if n != 1 then [(MoveB, n - 1, ipn, cur, b, [x | a], s!)]
+  else [(Bf, ipn, cur, b, [x | a], s!)]
+
+-- program exhausted: straighten the output and print it
+(Bf, ip, cur, b, [], l, r, o) : (Rev, o, [], (Fin,))
+(Fin, cs) : [say "%s" cs; exit 0]

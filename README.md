@@ -53,7 +53,10 @@ Git history might be a better source-of-truth about recent progress until I've e
   and decoding; `chars.lind` (§9, issue #12) shows character sugar
   matching, consing into strings, and building bytestrings;
   `bytes.lind` (§9) binds bytestring handles and
-  contrasts `bytesEqual` with `==`; `throttle.lind` (§8.2) is a
+  contrasts `bytesEqual` with `==`; `brainfuck.lind` (§13.12) is a
+  Brainfuck interpreter — zipper program and tape, jump-table
+  brackets, CPS reversal via `!` splice — that runs the classic
+  Hello World!; `throttle.lind` (§8.2) is a
   deliberately non-terminating long-runner — the CLI reports it as a
   deadlock when every machine ends up blocked.
 
