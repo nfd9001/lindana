@@ -45,7 +45,8 @@ Git history might be a better source-of-truth about recent progress until I've e
   exits with the program's status. `--parse` re-renders only.
 - `test/Spec.hs` + `test/Lindana/` — hspec suite: parser round-trips,
   matcher, machine loop, effects, bags, loader.
-- `examples/` — sample `.lind` files. `bags.lind` exercises named
+- `examples/` — sample `.lind` files. `hello.lind` is the issue #7
+  no-LHS one-shot Hello World; `bags.lind` exercises named
   bags end-to-end; `throttle.lind` (§8.2) is a deliberately
   non-terminating long-runner — the CLI reports it as a deadlock when
   every machine ends up blocked.
@@ -75,7 +76,8 @@ ghci> fmap renderProgram (parseProgram "(Tick,), (ResetEpoch, n) : (ResetEpoch, 
 
 ## Grammar status
 
-Implemented: machines, join patterns with `rd`/`in`, tuples with `!`
+Implemented: machines (including no-LHS one-shot machines, §1: `:` at
+the start of a line), join patterns with `rd`/`in`, tuples with `!`
 splice, Terse bracketed sequences `[a; b]`, `if/then/else`, verbs
 (`say`, `exit`, `die`/`quit`, `sleep`, `lob`, `error`, `panic`),
 builtin calls (`rand`, `typeOf`, `atomize`, `atos`), initial-bag

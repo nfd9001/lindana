@@ -10,7 +10,9 @@
 -- multi-line Terse machines like the §8.2 throttling example parse.
 --
 -- Deliberately not yet implemented (open questions §11): list
--- literal/pattern sugar, effect bundles.
+-- literal/pattern sugar, effect bundles. No-LHS machines (§1
+-- one-shots) are supported: @: actions@ parses as a machine with an
+-- empty join pattern.
 module Lindana.Parser
   ( parseProgram
   , PError
@@ -404,7 +406,11 @@ initialBlockP = do
 
 machineP :: Parser Decl
 machineP = do
-  lhs <- patElemP `sepBy1` symbolT ","
+  -- §1: the LHS may be empty — a no-LHS machine (@: actions@) runs
+  -- once, unconditionally, at program start, then terminates. The
+  -- colon is kept so the one-shot form is visually distinct from an
+  -- expression-led line.
+  lhs <- patElemP `sepBy` symbolT ","
   sepKw ":"
   body <- actionListP
   endOfMachine
