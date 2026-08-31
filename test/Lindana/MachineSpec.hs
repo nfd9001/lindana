@@ -12,6 +12,8 @@ module Lindana.MachineSpec (spec) where
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.List (sort)
+import qualified Data.Text as T
+import Data.Text.Encoding (encodeUtf8)
 import System.Exit (ExitCode (..))
 import System.Timeout (timeout)
 
@@ -36,6 +38,11 @@ t = ETuple
 
 int :: Integer -> Expr
 int = EInt
+
+-- | A cons-list literal (§11.5 desugaring): nested 2-tuples ending in
+-- the Nil atom.
+consL :: [Expr] -> Expr
+consL = foldr (\e acc -> ETuple [e, acc]) (EAtom "Nil")
 
 machine :: [PatElem] -> [Action] -> MachineDef
 machine = MachineDef globalBag
@@ -333,3 +340,80 @@ spec = do
       rrBag r `shouldBe` [VTuple [VAtom "Marked"]]
       output <- readIORef said
       reverse output `shouldBe` ["after-slept"]
+
+  describe "bytestring side-table (§9)" $ do
+    it "bytesBind registers a UTF-8 bytestring and emits (Bytes, H) completion" $ do
+      let m = machine []
+            [ BytesBind "Greeting" (consL [int 72, int 105, int 9786]), Die ]
+      r <- runProgram [m] []
+      Map.lookup "Greeting" (rrBytes r) `shouldBe`
+        Just (encodeUtf8 (T.pack "Hi\9786"))
+      rrBag r `shouldBe` [VTuple [VAtom "Bytes", VAtom "Greeting"]]
+
+    it "bytesDestroy removes the side-table entry" $ do
+      let m = machine []
+            [ BytesBind "G" (consL [int 65]), BytesDestroy (EAtom "G"), Die ]
+      r <- runProgram [m] []
+      rrBytes r `shouldBe` Map.empty
+
+    it "bytesEqual compares contents; == stays pure atom identity (§9)" $ do
+      -- Gate on the (Bytes, H) completion tuples: the binds are
+      -- deferred effects, so consumers must join on them (§9).
+      let m = machine (concat
+              [ take1 (PTuple [a "Bytes", a "A"])
+              , take1 (PTuple [a "Bytes", a "B"])
+              , take1 (p1 "Go") ])
+            [ If (ECall "bytesEqual" [EAtom "A", EAtom "B"])
+                 [Out (t [EAtom "ContentEq"])] [Out (t [EAtom "ContentNeq"])]
+            , If (EBin Eq (EAtom "A") (EAtom "B"))
+                 [Out (t [EAtom "SameAtom"])] [Out (t [EAtom "DistinctAtoms"])]
+            , Die ]
+          b = machine [] [ BytesBind "A" (consL [int 72])
+                         , BytesBind "B" (consL [int 72, int 72]), Die ]
+      -- B holds different bytes, so the two verdicts must disagree.
+      r <- runProgram [m, b] [t [EAtom "Go"]]
+      sort (map renderVal (rrBag r)) `shouldBe`
+        ["(ContentNeq)", "(DistinctAtoms)"]
+
+    it "bytesEqual is true for two handles with identical bytes" $ do
+      let m = machine (concat
+              [ take1 (PTuple [a "Bytes", a "A"])
+              , take1 (PTuple [a "Bytes", a "B"])
+              , take1 (p1 "Go") ])
+            [ If (ECall "bytesEqual" [EAtom "A", EAtom "B"])
+                 [Out (t [EAtom "ContentEq"]), Die]
+                 [Die] ]
+          b = machine [] [ BytesBind "A" (consL [int 72])
+                         , BytesBind "B" (consL [int 72]), Die ]
+      r <- runProgram [m, b] [t [EAtom "Go"]]
+      rrBag r `shouldBe` [VTuple [VAtom "ContentEq"]]
+
+    it "say %b decodes the handle's bytes" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (concat
+              [ take1 (PTuple [a "Bytes", a "G"]), take1 (p1 "Go") ])
+            [ Say "<%b>" [EAtom "G"], Die ]
+          b = machine [] [ BytesBind "G" (consL [int 72, int 105]), Die ]
+      _ <- runGlobal hooks [m, b] [t [EAtom "Go"]]
+      output <- readIORef said
+      reverse output `shouldBe` ["<Hi>"]
+
+    it "bytesEqual on an unbound handle aborts the machine's transaction" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (p1 "Go"))
+            [ Out (t [EAtom "Seen"])
+            , If (ECall "bytesEqual" [EAtom "Nope", EAtom "Nope"]) [Die] [Die] ]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
+      -- The interpret-time error kills the transaction: the Out never
+      -- commits, the tuple stays in the bag, no effects leak.
+      rrBag r `shouldBe` [VTuple [VAtom "Go"]]
+      output <- readIORef said
+      output `shouldBe` []
+
+    it "== between atom literals is identity even without bytes bound" $ do
+      let m = machine (take1 (p1 "Go"))
+            [ If (EBin Eq (EAtom "A") (EAtom "A"))
+                 [Out (t [EAtom "Same"]), Die]
+                 [Die] ]
+      r <- runProgram [m] [t [EAtom "Go"]]
+      rrBag r `shouldBe` [VTuple [VAtom "Same"]]

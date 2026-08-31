@@ -34,8 +34,9 @@ Git history might be a better source-of-truth about recent progress until I've e
   matcher (§3): racing matches, join patterns, `rd`/`in`, rest
   capture (§11.1).
 - `src/Lindana/Machine.hs` — the machine loop/scheduler (§1, §2),
-  the two-phase action layer + effect-runner (§7.2), and the named
-  bag machinery (§6): one thread per machine, `out` is same-bag,
+  the two-phase action layer + effect-runner (§7.2), the named
+  bag machinery (§6), and the §9 bytestring side-table
+  (`rtsBytes`): one thread per machine, `out` is same-bag,
   `lob` crosses bags, cross-bag atomicity for free.
 - `src/Lindana/Loader.hs` — the program loader: lowers a parsed
   `Program` into bag-tagged machines + per-bag initial tuples,
@@ -48,7 +49,8 @@ Git history might be a better source-of-truth about recent progress until I've e
 - `examples/` — sample `.lind` files. `hello.lind` is the issue #7
   no-LHS one-shot Hello World; `bags.lind` exercises named
   bags end-to-end; `lists.lind` (§11.5) sums a list via cons-pattern
-  sugar; `throttle.lind` (§8.2) is a deliberately
+  sugar; `bytes.lind` (§9) binds bytestring handles and contrasts
+  `bytesEqual` with `==`; `throttle.lind` (§8.2) is a deliberately
   non-terminating long-runner — the CLI reports it as a deadlock when
   every machine ends up blocked.
 
@@ -83,9 +85,12 @@ splice, list/cons sugar (§11.5, provisional: `[a, b, c]` literals and
 `[h | t]` patterns desugar at parse time to nested 2-tuples ending in
 the `Nil` atom — rendering shows the desugared form), Terse bracketed
 sequences `[a; b]`, `if/then/else`, verbs
-(`say`, `exit`, `die`/`quit`, `sleep`, `lob`, `error`, `panic`),
-builtin calls (`rand`, `typeOf`, `atomize`, `atos`), initial-bag
-blocks, named bag blocks.
+(`say` with `%b` for bytestring handles, `exit`, `die`/`quit`,
+`sleep`, `lob`, `error`, `panic`, `bytesBind`, `bytesDestroy`),
+builtin calls (`rand`, `typeOf`, `atomize`, `atos`, `bytesEqual`),
+initial-bag blocks, named bag blocks, the §9 bytestring side-table
+(opaque atom handles; `==` is pure atom identity, `bytesEqual`
+compares contents; binds emit a `(Bytes, H)` completion tuple).
 
 Not yet (handover §11): string sugar beyond literals,
 effect bundles. Provisional (flip

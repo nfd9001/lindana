@@ -65,9 +65,9 @@ import Lindana.Syntax
 
 -- | Runtime values. Deliberately matching the pattern/expr literal
 -- kinds in "Lindana.Syntax": no list or string primitive (§9 — those
--- are sugar over tuples), and no bytestring handles yet (those are
--- just 'VAtom's plus a runtime side-table, per §9; side-table not
--- built yet).
+-- are sugar over tuples), and no bytestring handles (those are just
+-- 'VAtom's over the RTS's side-table, per §9 — see 'rtsBytes' in
+-- "Lindana.Machine").
 data Val
   = VAtom Name
   | VInt Integer
@@ -302,6 +302,10 @@ evalElemG builtin env (ESplice x) = do
 evalElemG builtin env e = (:[]) <$> evalExprG builtin env e
 
 arith :: Op -> Val -> Val -> Val
+-- §9: @==@ stays pure atom identity, uniformly — comparing two
+-- bytestring handles compares the handles, not the contents.
+arith Eq  (VAtom a) (VAtom b) = VInt (if a == b then 1 else 0)
+arith Neq (VAtom a) (VAtom b) = VInt (if a /= b then 1 else 0)
 arith op (VInt a) (VInt b)       = VInt (intOp op a b)
 arith op (VDouble a) (VDouble b) = VDouble (dblOp op a b)
 arith _ _ _ = error "arith: non-numeric operands (must route via error, §3.3)"

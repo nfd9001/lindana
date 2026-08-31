@@ -15,16 +15,18 @@
 --     replacement tuples". Tuple-space verbs (@out@, @lob@, and
 --     @error@'s Error-tuple write) execute inside that transaction,
 --     atomically with the match and each other. Every irrevocable
---     verb (@say@, @sleep@, @exit@, @panic@) comes back as a
---     deferred /bundle/ of effects, pushed post-commit.
+--     verb (@say@, @sleep@, @exit@, @panic@, @bytesBind@,
+--     @bytesDestroy@) comes back as a deferred /bundle/ of effects,
+--     pushed post-commit.
 --
 --   * The 'effectRunner' is a single thread draining bundles FIFO
 --     from a 'TQueue', one bundle live at a time — sequencing and
 --     synchronization from ordinary primitives, per §7.2, with no
 --     rollback on partial failure. Provisionally one /global/ runner
---     (§7.3 still open); bytestring side-table work (§9) doesn't
---     exist yet, so the "route @create@\/@destroy@ through it?"
---     question doesn't arise yet either.
+--     (§7.3 still open). Bytestring side-table work (§9) routes
+--     through it too (§11.8, provisionally resolved): a bind writes
+--     'rtsBytes' and emits the @(Bytes, H)@ completion tuple into
+--     @Global@; a destroy just drops the entry.
 --
 -- Provisional decisions made here (flip-worthy, per the house style):
 --
@@ -87,10 +89,14 @@ import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.Exception (finally)
 import Control.Monad (unless, when)
+import Data.ByteString (ByteString)
+import Data.Char (chr)
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import qualified Data.Text as T
+import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import System.Random (StdGen, mkStdGen, uniformR)
 import System.Exit (ExitCode (..))
 import System.IO (hPutStrLn, stderr)
@@ -113,8 +119,9 @@ errorBag = "Error"
 
 -- | The runtime system: @Global@'s matchable bag, the effect queue,
 -- the @rand@ seed, the live-machine count, the program exit status,
--- and the named bags (§6) — machineless @lob@ accumulators and bags
--- with machines alike; they are the same structure.
+-- the named bags (§6) — machineless @lob@ accumulators and bags
+-- with machines alike; they are the same structure — and the §9
+-- bytestring side-table.
 data RTS = RTS
   { rtsBag   :: RBag                  -- ^ @Global@'s bag
   , rtsQueue :: TQueue Bundle
@@ -128,6 +135,11 @@ data RTS = RTS
   , rtsBags  :: TVar (Map Name RBag)  -- ^ named bags other than @Global@
                                       --   (§6): machineless accumulators
                                       --   and live bags alike
+  , rtsBytes :: TVar (Map Name ByteString)  -- ^ §9 bytestring side-table:
+                                      --   opaque atom handle → UTF-8
+                                      --   bytes. To the matcher a handle
+                                      --   is just an ordinary atom; only
+                                      --   the @bytes*@ verbs reach in.
   , rtsHooks :: Hooks
   }
 
@@ -157,9 +169,10 @@ newRTSWith hooks = atomically $ do
   stop  <- newTVar False
   seed  <- newTVar (mkStdGen 12345)
   bags  <- newTVar Map.empty
+  bytes <- newTVar Map.empty
   pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
            , rtsLive = live, rtsExit = exit, rtsStop = stop
-           , rtsBags = bags, rtsHooks = hooks
+           , rtsBags = bags, rtsBytes = bytes, rtsHooks = hooks
            }
 
 -- | Resolve a bag name to its 'RBag' (§6). @Global@ is the main bag;
@@ -218,10 +231,17 @@ newtype Bundle = Bundle { bundleEffects :: [Effect] }
 -- ('EffExit'/'EffPanic') end the bundle: the program is over, later
 -- effects are dropped (§7.2 gives no rollback; here not even a queue).
 data Effect
-  = EffSay String [Val]   -- ^ @say "fmt" args…@ (@%i@, @%s@, @%a@, @%%@)
+  = EffSay String [Val]   -- ^ @say "fmt" args…@ (@%i@, @%s@, @%a@, @%b@, @%%@)
   | EffSleep Int          -- ^ @sleep e@ — milliseconds (provisional unit)
   | EffExit Val           -- ^ @exit e@ — terminate the program
   | EffPanic Val          -- ^ @panic e@ — fatal (§6.4)
+  | EffBytesBind Name [Int] -- ^ @bytesBind H cps@ (§9) — register the
+                          --   UTF-8 encoding of the codepoints under the
+                          --   atom handle, then emit @(Bytes, H)@ into
+                          --   @Global@ (the bind's completion tuple,
+                          --   the deterministic gate for consumers)
+  | EffBytesDestroy Name  -- ^ @bytesDestroy H@ (§9) — drop the entry;
+                          --   later lookups are the user's to guard
   deriving (Eq, Show)
 
 --------------------------------------------------------------------------------
@@ -259,6 +279,13 @@ rtsBuiltin rts name args = case (name, args) of
     | capitalized s   -> pure (VAtom s)
     | otherwise       -> error "atomize: string must be capitalized (§4: panic)"
   ("atos", [VAtom n]) -> pure (VStr n)
+  -- §9: content comparison is a verb's job, reaching into the
+  -- side-table; @==@ never does (it stays pure atom identity).
+  ("bytesEqual", [VAtom x, VAtom y]) -> do
+    m <- readTVar (rtsBytes rts)
+    case (Map.lookup x m, Map.lookup y m) of
+      (Just a, Just b) -> pure (VInt (if a == b then 1 else 0))
+      _ -> error ("bytesEqual: unknown bytestring handle(s): " ++ x ++ ", " ++ y)
   _ -> error ("evalExpr: unknown builtin or bad arity: " ++ name)
 
 capitalized :: String -> Bool
@@ -318,6 +345,15 @@ interpretActions rts bag env = go []
         ebag <- bagForSTM rts errorBag
         outSTM ebag (errorTuple t)
         go acc rest
+      BytesBind h e -> do
+        cps <- codepoints <$> evalR rts env e
+        go (EffBytesBind h cps : acc) rest
+      BytesDestroy e -> do
+        v <- evalR rts env e
+        n <- case v of
+          VAtom n -> pure n
+          _ -> error "bytesDestroy: handle must be an atom (§9)"
+        go (EffBytesDestroy n : acc) rest
       If c th el -> do
         b <- truthy <$> evalR rts env c
         go acc ((if b then th else el) ++ rest)
@@ -326,6 +362,23 @@ interpretActions rts bag env = go []
       VInt n    -> EffSleep (fromInteger n)   -- milliseconds
       VDouble d -> EffSleep (round (d * 1000))
       _ -> error "sleep: non-numeric operand (action-layer check, §3.3)"
+
+-- | §9: a byte/int list is a cons-list of @VInt@ codepoints ending in
+-- the @Nil@ atom — exactly what the §11.5 list literal builds. Shape
+-- and range are the action layer's check (§3.3), same as @sleep@.
+codepoints :: Val -> [Int]
+codepoints (VInt n) = [cp n]
+codepoints (VTuple [VInt n, rest]) = cp n : codepoints rest
+codepoints (VTuple _) =
+  error "bytesBind: list elements must be codepoint ints (§9)"
+codepoints (VAtom "Nil") = []
+codepoints _ = error "bytesBind: expected a list of codepoint ints (§9)"
+
+-- | Top level, not a @where@: GHC 9.0 only scopes a @where@ over the
+-- equations it follows (same deal as 'intOp' in Runtime).
+cp :: Integer -> Int
+cp n | 0 <= n && n <= 0x10FFFF = fromInteger n
+     | otherwise               = error "bytesBind: codepoint out of range (0..0x10FFFF)"
 
 -- | @error e@ (§6.4): an @(Error, …)@ tuple into the named @Error@
 -- bag (conceptually sugar over @lob Error …@); a tuple argument's
@@ -427,25 +480,46 @@ runBundle rts = go
   where
     go [] = pure ()
     go (e : es) = case e of
-      EffSay f vs -> hookSay (rtsHooks rts) (formatSay f vs) >> go es
+      EffSay f vs -> do
+        m <- readTVarIO (rtsBytes rts)
+        hookSay (rtsHooks rts) (formatSay m f vs) >> go es
       EffSleep ms -> threadDelay (ms * 1000) >> go es
       EffExit v   -> atomically (setExit rts (exitCodeOf v))  -- program over
       EffPanic v  -> do
         hookPanic (rtsHooks rts) (renderVal v)
         atomically (setExit rts (ExitFailure 1))
+      EffBytesBind h cps -> do
+        -- §11.8 (provisionally resolved): create/destroy route through
+        -- the shared effect-runner. The completion tuple lands in
+        -- @Global@ (the front door) so consumers can join on it.
+        atomically $ do
+          modifyTVar' (rtsBytes rts) (Map.insert h (encodeUtf8 (T.pack (map chr cps))))
+          b <- bagForSTM rts globalBag
+          outSTM b (VTuple [VAtom "Bytes", VAtom h])
+        go es
+      EffBytesDestroy h ->
+        atomically (modifyTVar' (rtsBytes rts) (Map.delete h)) >> go es
 
 setExit :: RTS -> ExitCode -> STM ()
 setExit rts c = writeTVar (rtsExit rts) (Just c)
 
--- | @say@ formatting: @%i@ int, @%s@ string, @%a@ render-any, @%%@ a
--- literal @%@. Mismatched arg counts are provisional Haskell errors
+-- | @say@ formatting: @%i@ int, @%s@ string, @%a@ render-any, @%b@
+-- bytestring handle (decoded, §9), @%%@ a literal @%@. Mismatched arg
+-- counts are provisional Haskell errors
 -- (pending unified @error@ routing, §3.3).
-formatSay :: String -> [Val] -> String
-formatSay fmt = go fmt
+formatSay :: Map Name ByteString -> String -> [Val] -> String
+formatSay bytes fmt = go fmt
   where
     go ('%' : 'i' : cs) (VInt n : as)   = show n ++ go cs as
     go ('%' : 's' : cs) (VStr s : as)   = s ++ go cs as
     go ('%' : 'a' : cs) (v : as)        = renderVal v ++ go cs as
+    go ('%' : 'b' : cs) (VAtom h : as) =
+      case Map.lookup h bytes of
+        Nothing -> error ("say: unknown bytestring handle " ++ h)
+        Just bs -> case decodeUtf8' bs of
+          Right t -> T.unpack t ++ go cs as
+          Left _  -> error ("say: bytestring " ++ h ++ " is not valid UTF-8")
+    go ('%' : 'b' : _)  _               = error "say: %b needs an atom bytestring handle"
     go ('%' : '%' : cs) as              = '%' : go cs as
     go ('%' : _ : _) []                 = error "say: too few arguments"
     go ('%' : _) _                      = error "say: bad directive or dangling %"
@@ -477,6 +551,8 @@ data RunResult = RunResult
   , rrBags :: Map Name [Val]  -- ^ final contents of every other named
                               --   bag (§6): machineless accumulators
                               --   and live bags alike
+  , rrBytes :: Map Name ByteString  -- ^ final §9 side-table state
+                                    --   (surviving bytestring handles)
   } deriving (Eq, Show)
 
 -- | Run a @Global@-only program: initial tuples land in @Global@ in
@@ -535,5 +611,6 @@ runLoaded hooks machines initial = do
   wait runner
   bag   <- bagContents (rtsBag rts)
   bags  <- traverse bagContents =<< readTVarIO (rtsBags rts)
+  bytes <- readTVarIO (rtsBytes rts)
   ex    <- readTVarIO (rtsExit rts)
-  pure (RunResult (fromMaybe ExitSuccess ex) bag bags)
+  pure (RunResult (fromMaybe ExitSuccess ex) bag bags bytes)

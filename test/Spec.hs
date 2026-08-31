@@ -134,6 +134,22 @@ main = hspec $ do
       it "round-trips through the pretty-printer (rendered as the desugared tuples)" $
         roundTrips "{ ([1, 2, 3],) }\n([],) : die" `shouldBe` True
 
+    describe "bytestring side-table grammar (§9)" $ do
+      it "parses bytesBind with a codepoint list literal" $ do
+        p <- parseOk ": bytesBind Greeting [72, 105]"
+        progDecls p `shouldBe`
+          [Machine [] [BytesBind "Greeting" (ETuple [EInt 72, ETuple [EInt 105, EAtom "Nil"]])]]
+      it "parses bytesDestroy" $ do
+        p <- parseOk "(h,) : bytesDestroy h"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PVar "h"])] [BytesDestroy (EVar "h")]]
+      it "parses bytesEqual as a builtin call in condition position" $ do
+        p <- parseOk "(H,) : if bytesEqual(H, Greeting) then die else die"
+        progDecls p `shouldHaveLength` 1
+      it "round-trips the bytestring verbs" $
+        roundTrips ": bytesBind Greeting [72, 105]\n(H,) : [bytesDestroy H; if bytesEqual(H, H) then die else die]"
+          `shouldBe` True
+
     it "parses a no-LHS machine (§1 one-shot): the issue #7 Hello World" $ do
       p <- parseOk $ T.unlines
         [ ": [say \"Hello world!\"; (Stop, 0)]"
