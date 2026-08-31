@@ -80,6 +80,7 @@ import Data.List (intercalate)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import System.Random (StdGen, mkStdGen, uniformR)
 import System.Exit (ExitCode (..))
 import System.IO (hPutStrLn, stderr)
 
@@ -96,7 +97,10 @@ import Lindana.Syntax
 data RTS = RTS
   { rtsBag   :: RBag                  -- ^ the (provisionally sole) matchable bag
   , rtsQueue :: TQueue Bundle
-  , rtsSeed  :: TVar Integer          -- ^ @rand@'s LCG state (§8)
+  , rtsSeed  :: TVar StdGen           -- ^ @rand@'s state (§8): splitmix
+                                      -- via System.Random; pure + fixed
+                                      -- seed, so evaluable in STM and
+                                      -- runs stay deterministic
   , rtsLive  :: TVar Int              -- ^ live machine threads
   , rtsExit  :: TVar (Maybe ExitCode)
   , rtsStop  :: TVar Bool             -- ^ graceful effect-runner shutdown
@@ -125,10 +129,10 @@ newRTSWith :: Hooks -> IO RTS
 newRTSWith hooks = atomically $ do
   bag   <- newBagSTM
   queue <- newTQueue
-  seed  <- newTVar 12345
   live  <- newTVar 0
   exit  <- newTVar Nothing
   stop  <- newTVar False
+  seed  <- newTVar (mkStdGen 12345)
   bags  <- newTVar Map.empty
   pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
            , rtsLive = live, rtsExit = exit, rtsStop = stop
@@ -192,7 +196,8 @@ evalR rts env = evalExprG (rtsBuiltin rts) env
 -- | The builtins (§3.3, §7). These run /inside the matching
 -- transaction/ — that's what keeps "read the join patterns, decide,
 -- write replacement tuples" (§8.2 note) atomic even when the decision
--- uses @rand@: the seed is an ordinary 'TVar' in the RTS.
+-- uses @rand@: the generator state is an ordinary 'TVar' in the RTS,
+-- and 'uniformR' is pure, so the step is an ordinary STM read/write.
 --
 -- Malformed calls (unknown builtin, wrong arity/kind) are provisional
 -- Haskell-level errors — unified @error@-verb routing pending the
@@ -206,13 +211,10 @@ rtsBuiltin rts name args = case (name, args) of
   ("rand", [VInt n])
     | n <= 0    -> pure (VInt 0)   -- provisional: rand of non-positive is 0
     | otherwise -> do
-        s <- readTVar (rtsSeed rts)
-        let s' = (randMult * s + randInc) `mod` randModulus
-        writeTVar (rtsSeed rts) s'
-        -- Sample the HIGH half for the result: LCG low bits have tiny
-        -- periods (bit k has period 2^k), so taking `s' mod n` would
-        -- make rand(2) alternate 0,1,0,1 deterministically.
-        pure (VInt ((s' `div` (2 ^ (32 :: Integer))) `mod` n))
+        g <- readTVar (rtsSeed rts)
+        let (v, g') = uniformR (0, n - 1) g
+        writeTVar (rtsSeed rts) g'
+        pure (VInt (toInteger v))
   ("typeOf", [v])     -> pure (VAtom (typeTag v))
   ("atomize", [VStr s])
     | capitalized s   -> pure (VAtom s)
@@ -223,16 +225,6 @@ rtsBuiltin rts name args = case (name, args) of
 capitalized :: String -> Bool
 capitalized (c : _) = c `elem` ['A' .. 'Z']
 capitalized []      = False
-
--- | @rand@'s LCG parameters: Knuth's MMIX generator (TAOCP 2, §3.3.4)
--- — multiplier 6364136223846793005, increment 1442695040888963407,
--- modulus 2^64. Hull–Dobell: full period 2^64. Provisional — the
--- cheapest generator that's decent; swap for e.g. splitmix if rand
--- quality ever matters.
-randMult, randInc, randModulus :: Integer
-randMult     = 6364136223846793005
-randInc      = 1442695040888963407
-randModulus  = 2 ^ (64 :: Integer)
 
 typeTag :: Val -> Name
 typeTag VAtom{}   = "Atom"

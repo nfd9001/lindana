@@ -215,11 +215,11 @@ spec = do
       all (\n' -> n' >= 0 && n' < 10) rolls `shouldBe` True
       rrBag r2 `shouldBe` rrBag r1
 
-    it "rand(2) is not a strict alternator (high-bit sampling)" $ do
-      -- LCG low bits have period 2; sampling them for rand(2) yields a
-      -- perfect 0,1,0,1… alternation. Draw four coins and require
-      -- three consecutive identical values (impossible under strict
-      -- alternation); deterministic under the fixed seed.
+    it "rand(2) is not a strict alternator (bounded-range gen)" $ do
+      -- Hand-rolled LCG + low-bit sampling alternated 0,1,0,1…;
+      -- the splitmix-backed StdGen must not. Draw four coins and
+      -- require three consecutive identical values (impossible under
+      -- strict alternation); deterministic under the fixed seed.
       let roller = machine (take1 (p1 "Roll"))
             [ Out (t [ EAtom "C1", ECall "rand" [int 2]
                      , ECall "rand" [int 2]

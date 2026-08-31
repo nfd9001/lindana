@@ -17,6 +17,7 @@ library
                     , containers
                     , stm
                     , async
+                    , random
                     , megaparsec >=9.0 && <9.3
     default-language: Haskell2010
     ghc-options:      -Wall
