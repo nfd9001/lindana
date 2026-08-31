@@ -193,6 +193,26 @@ spec = do
       said `shouldBe` ["Hello world!"]
       rrExit rr `shouldBe` ExitSuccess
 
+  describe "list/cons sugar (§11.5)" $ do
+    it "walks a list end-to-end: cons-pattern iterates, Nil-pattern exits" $ do
+      l <- loadOk $ unlines
+        [ "{ ([1, 2, 3],) }"
+        , "([h | t],) : [say \"%i\" h; (t,)]"
+        , "([],) : exit 0"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["1", "2", "3"]
+      rrExit rr `shouldBe` ExitSuccess
+
+    it "a cons-pattern machine stays re-armed until the list is empty" $ do
+      l <- loadOk $ unlines
+        [ "{ ([7],) }"
+        , "([h | t],) : (t,)"
+        , "([],) : exit 0"
+        ]
+      r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
+      rrExit r `shouldBe` ExitSuccess
+
 -- | Run loaded, capturing @say@ output and the result.
 runCaptureSay :: [MachineDef] -> Map Name [Expr]
               -> IO ([String], RunResult)

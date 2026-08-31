@@ -1,0 +1,14 @@
+-- §11.5 list/cons sugar (provisional): [a, b, c] is sugar for the
+-- nested 2-tuples (a, (b, (c, Nil))); [] is the Nil atom itself;
+-- [h | t] in a pattern destructures head and tail.
+--
+-- A cons-pattern machine walks the list, accumulating into Total;
+-- when only the empty list remains, the finisher reports and stops.
+-- The walker re-arms blocked on a nonempty list that never comes —
+-- harmless: exit (§1) ends the program.
+
+{ ([3, 1, 4, 1, 5],), (Total, 0) }
+
+([h | t],), (Total, n) : [(Total, n + h); (t,)]
+([],), (Total, n)      : [say "sum is %i" n; (Stop, 0)]
+(Stop, c) : if c then [say "Error, closing"; exit c] else [exit c]

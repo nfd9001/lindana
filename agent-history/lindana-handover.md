@@ -227,7 +227,7 @@ Because a backed-off request is **re-emitted into the open bag** rather than ret
 
 - **Numbers**: no distinct declared numeric types — literal form infers system-width `long` or `double` (integer literal → long, decimal literal → double). **Open**: does mixed int/double arithmetic auto-promote, or is that a type error routed through `error`? Not decided.
 - **Booleans**: C-style truthiness is permitted (an `if` condition can be a raw int; `0` is falsy). A distinct `Bool` type is also being added, with `True`/`False` presumably just ordinary capitalized atoms (consistent with the atoms-as-type-tags idea). Exact unifying truthiness rule (which values besides `0`/`False` count as falsy — e.g. does the empty tuple `()` count?) not finalized.
-- **Lists**: **no new primitive type.** Preference is cons-lists — nested 2-tuples, presumably terminated by a sentinel atom (e.g. `Nil`) — with syntactic sugar for literals and pattern destructuring (something in the shape of `[1,2,3]` / `[H|T]`). **Exact desugaring/sugar syntax not yet written.**
+- **Lists**: **no new primitive type.** **Provisionally resolved** (§13.7, branch `parser/list-cons-sugar`): cons-lists — nested 2-tuples terminated by the `Nil` atom — with parse-time sugar: `[a, b, c]` → `(a, (b, (c, Nil)))`, `[h | t]` conses onto an arbitrary tail expression/pattern, `[]` → `Nil`; multi-head forms (`[a, b | t]`) likewise. Purely syntactic — no AST nodes, so the pretty-printer renders the desugared tuple form (which round-trips). `Nil` is *not* a reserved word (a program may still use it as an ordinary atom; doing so makes list literals meaningless — documented hazard, flip-worthy).
 - **Strings (casual)**: **no primitive type either.** Sugar over cons-lists of codepoint `Int`s, in the spirit of Haskell's `type String = [Char]` but with weaker guarantees (no static type system enforcing anything is really "chars"). Actions consuming a "string" (e.g. a print action) are responsible for checking it looks list-of-int-shaped and `error`-ing if not — same discipline as arithmetic (§3.3), no special-casing needed anywhere in the runtime. **Open**: is there a distinct `Char` type, or plain `Int`s all the way down with `"..."` purely as literal sugar and interpretation entirely up to whichever action consumes the value? Leaning toward the latter for consistency, but not confirmed.
 - **Strings (real/UTF-8)**: since primitive strings were dropped, real string work goes through **opaque bytestring handles** rather than a first-class type:
   - An effect converts a byte/int list into a UTF-8 bytestring and returns/binds an **Atom** handle.
@@ -267,7 +267,7 @@ Roughly in order of how foundational they are:
 2. **Repeated variables within one pattern** — does `(a, a)` require equality between the two positions (Prolog-style), or is it a rebind/shadow? Raised, never resolved.
 3. **Mixed int/double arithmetic** — auto-promote, or a type error via `error`? (§9)
 4. **Char type vs. plain Ints** for string sugar — posed, not confirmed either way (§9).
-5. **Exact list literal/pattern sugar syntax** for cons-lists (§9).
+5. **Exact list literal/pattern sugar syntax for cons-lists (§9)** — **provisionally resolved** (§13.7, branch `parser/list-cons-sugar`): `[a, b, c]` / `[h | t]` / `[]`, parse-time desugaring to nested 2-tuples with the `Nil` sentinel atom; no AST nodes; renderer emits the desugared form; `Nil` deliberately not reserved. Flip-worthy.
 6. **Concrete effect-bundle syntax** for the reframed effect-runner model (§7) — the old bracket sketch was for the superseded STM-flavored idea and doesn't apply.
 7. **Effect-runner scope**: one global runner, or multiple (e.g. per-bag)? (§7.3)
 8. **Bytestring lifecycle vs. effect-runner**: do `create`/`destroy` route through the shared effect-runner, or use independent synchronization? (§7.3)
@@ -355,4 +355,15 @@ New module `src/Lindana/Loader.hs`; `src/Lindana/Machine.hs` reworked for bag sc
 - **Examples**: `examples/toy.lind` had a latent pre-runtime bug — `("Print",)` is a 1-tuple containing the /string/ `"Print"`, which the structural matcher rightly refuses to match against the atom pattern `(Print, s)`; fixed to `(Print,)`. New `examples/bags.lind` exercises the whole §6 story (front door, cross-bag lob, machineless `Log` accumulator, user `Error` handler with rest capture, `rd` join clause) and terminates. `throttle.lind` (§8.2) is deliberately non-terminating — the CLI now reports it as a deadlock when it goes fully idle.
 
 Tests: 22 new cases (loader scoping/rules/§11.10, §6.4 default-Error behavior end-to-end via parse→load→run, bag isolation, same-bag `out`, cross-bag `lob` incl. the §6.2 drain, `lob Global`, parser one-line bag blocks) — 75 total green, randomized order, 3× repeat stable. Zero `-Wall` warnings.
+
+### 13.7 Done — list/cons sugar (§11.5, §9 lists, §11 item 5), branch `parser/list-cons-sugar`
+
+Parse-time desugaring in `Parser.hs`; the AST is untouched.
+
+- **Syntax (provisional, flip-worthy)**: `[a, b, c]` → `(a, (b, (c, Nil)))`; `[]` → `Nil`; `[h | t]` conses onto an arbitrary tail (expression or pattern); multi-head `[a, b | t]` → `(a, (b, t))`. List literals nest freely (`[[1], []]` etc.). Elements in expression position are tuple elements, so `!` splice works there too; pattern elements are plain patterns (rest-capture `var!` is a tuple-level concept — the cons tail is the list-shaped way to bind the remainder).
+- **No AST nodes, no `Nil` reservation**: the parser lowers to `ETuple`/`PAtom` directly, so `renderProgram` emits the desugared tuple form — which reparses to an equal AST (round-trip intact). `Nil` remains an ordinary atom; a program that uses `Nil` as data makes list literals meaningless — documented hazard rather than a reserved word, for now.
+- **Bracket depth**: list brackets participate in the existing newline-depth machinery (`grouped`), so multi-line lists work inside machines and initial blocks.
+- **Tests**: 10 new cases — parser: literal/empty/cons-tail desugaring in expression and pattern position, multi-head patterns, nesting, round-trip; loader: end-to-end list walk (`([h | t],)` iterating machine + `([],)` exit machine, says `1`–`3`, `ExitSuccess`). 87 total green, randomized order, 3× repeat stable. Zero `-Wall` warnings.
+- **Examples**: `examples/lists.lind` — sums a list literal via a cons-pattern walker + `Total` accumulator, then exits via the `(Stop, c)` idiom.
+- **Remaining threads**: §9 bytestring side-table and §11.6 effect-bundle grammar (see PR #8's "Next"). Note for §9: list sugar gives byte-list literals (`[72, 105]`) for free; casual-string sugar over codepoint lists (§9) would now desugar to lists — unaddressed, `VStr` untouched this slice.
 
