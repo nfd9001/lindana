@@ -93,6 +93,14 @@ main = hspec $ do
       roundTrips "W { (Ping,) : die }" `shouldBe` True
       p <- parseOk "W { (Ping,) : die }\n(Tick,) : die"
       progDecls p `shouldHaveLength` 2
+
+    it "parses a no-LHS machine (§1 one-shot): the issue #7 Hello World" $ do
+      p <- parseOk $ T.unlines
+        [ ": [say \"Hello world!\"; (Stop, 0)]"
+        , "(Stop, c) : if c then [say \"Error, closing\"; exit c] else [exit c]"
+        ]
+      progDecls p `shouldHaveLength` 2
+      roundTrips ": [say \"Hello world!\"; (Stop, 0)]" `shouldBe` True
   spec
   LoaderSpec.spec
   RuntimeSpec.spec

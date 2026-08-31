@@ -7,7 +7,9 @@
 -- the runtime behavior matters.
 module Lindana.LoaderSpec (spec) where
 
+import Data.IORef
 import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import qualified Data.Text as T
 import System.Exit (ExitCode (..))
 
@@ -169,6 +171,38 @@ spec = do
         ]
       r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
       rrExit r `shouldBe` ExitSuccess
+
+  describe "no-LHS machines (§1 one-shot, issue #7)" $
+    it "the issue #7 Hello World runs end-to-end: one-shot fires, then exit 0" $ do
+      l <- loadOk $ unlines
+        [ ": [say \"Hello world!\"; (Stop, 0)]"
+        , "(Stop, c) : if c then [say \"Error, closing\"; exit c] else [exit c]"
+        ]
+      -- The loader must accept an empty join pattern (§1: runs once,
+      -- unconditionally, at start) without mangling it. (The §6.4
+      -- default Error machine is also present; filter it out.)
+      let userMachs = [m | m <- loadedMachines l, machBag m /= errorBag]
+      [oneshot, stopper] <- pure userMachs
+      machBag oneshot `shouldBe` "Global"
+      machJoin oneshot `shouldBe` []
+      machBody stopper `shouldBe`
+        [If (EVar "c")
+            [Say "Error, closing" [], Exit (EVar "c")]
+            [Exit (EVar "c")]]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["Hello world!"]
+      rrExit rr `shouldBe` ExitSuccess
+
+-- | Run loaded, capturing @say@ output and the result.
+runCaptureSay :: [MachineDef] -> Map Name [Expr]
+              -> IO ([String], RunResult)
+runCaptureSay ms initial = do
+  saidRef <- newIORef []
+  let hooks = Hooks { hookSay = \s -> modifyIORef' saidRef (s :)
+                    , hookPanic = \_ -> pure () }
+  rr <- runLoaded hooks ms initial
+  said <- reverse <$> readIORef saidRef
+  pure (said, rr)
 
 -- Hooks that keep end-to-end runs quiet (panic would otherwise hit
 -- real stderr).
