@@ -3,5 +3,5 @@
 }
 
 (Add, a, b, c) : (c!, a + b)
-(Print, s) : [say "Sum is %i" s; (Stop, 1)]
+(Print, s) : [say "Sum is %i" s; (Stop, 0)]
 (Stop, c) : if c then [say "Error, closing"; exit c] else [exit c]
