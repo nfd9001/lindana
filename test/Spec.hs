@@ -167,6 +167,35 @@ main = hspec $ do
       it "round-trips through the pretty-printer (rendered as the desugared tuples)" $
         roundTrips "{ (\"Hi\",) }\n(\"add\", x) : die" `shouldBe` True
 
+    -- §9 character sugar (issue #12, provisional): 'x' is the single
+    -- codepoint as a plain Int (§11.4 — no Char type), '' is a synonym
+    -- for Nil, and multi-codepoint '…' is a parse error (use a string).
+    -- No AST nodes: rendering shows the desugared form (round-trip
+    -- friendly).
+    describe "character sugar (§9, issue #12)" $ do
+      it "desugars a char literal to the plain codepoint Int" $ do
+        p <- parseOk "{ ('+', 0) }"
+        progDecls p `shouldBe` [Initial [ETuple [EInt 43, EInt 0]]]
+      it "desugars '' to the Nil atom" $ do
+        p <- parseOk "{ ('') }"
+        progDecls p `shouldBe` [Initial [ETuple [EAtom "Nil"]]]
+      it "resolves escapes before taking the codepoint" $ do
+        p <- parseOk "{ ('\\n', '\\'', '\\\\') }"
+        progDecls p `shouldBe` [Initial [ETuple [EInt 10, EInt 39, EInt 92]]]
+      it "desugars a char pattern to a plain Int pattern" $ do
+        p <- parseOk "('a', n) : die"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PInt 97, PVar "n"])] [Die]]
+      it "is the same shape as the int literal: 'a' IS 97" $ do
+        a1 <- parseOk "{ ('a',) }"
+        a2 <- parseOk "{ (97,) }"
+        a1 `shouldBe` a2
+      it "rejects multiple codepoints in '…' (use a string, §9)" $ do
+        parseProgram "{ ('ab',) }" `shouldSatisfy` isLeft
+        parseProgram "('ab', x) : die" `shouldSatisfy` isLeft
+      it "round-trips through the pretty-printer (rendered as the desugared values)" $
+        roundTrips "{ ('A', 3) }\n('A', n) : die" `shouldBe` True
+
     describe "bytestring side-table grammar (§9)" $ do
       it "parses bytesBind with a codepoint list literal" $ do
         p <- parseOk ": bytesBind Greeting [72, 105]"

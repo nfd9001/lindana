@@ -50,7 +50,9 @@ Git history might be a better source-of-truth about recent progress until I've e
   no-LHS one-shot Hello World; `bags.lind` exercises named
   bags end-to-end; `lists.lind` (§11.5) sums a list via cons-pattern
   sugar; `strings.lind` (§9) shows casual-string literals matching
-  and decoding; `bytes.lind` (§9) binds bytestring handles and
+  and decoding; `chars.lind` (§9, issue #12) shows character sugar
+  matching, consing into strings, and building bytestrings;
+  `bytes.lind` (§9) binds bytestring handles and
   contrasts `bytesEqual` with `==`; `throttle.lind` (§8.2) is a
   deliberately non-terminating long-runner — the CLI reports it as a
   deadlock when every machine ends up blocked.
@@ -88,7 +90,9 @@ the `Nil` atom — rendering shows the desugared form), casual-string
 sugar (§9, provisional: `"..."` literals desugar at parse time to the
 same cons-list shape over codepoint `Int`s — plain Ints all the way
 down, no `Char`/`Str` type; `say %s` decodes, `atomize`/`atos`
-convert), Terse bracketed
+convert), character sugar (§9, issue #12, provisional: `'x'` is the
+single codepoint as a plain Int, `''` is a synonym for `Nil`, and
+multi-codepoint `'…'` is a parse error — use a string), Terse bracketed
 sequences `[a; b]`, `if/then/else`, verbs
 (`say` with `%b` for bytestring handles, `exit`, `die`/`quit`,
 `sleep`, `lob`, `error`, `panic`, `bytesBind`, `bytesDestroy`),
@@ -103,6 +107,6 @@ Not yet (handover §11): mixed int/double arithmetic, effect-runner
 scope, unified error routing. Provisional (flip
 worthy): pattern-side rest capture is trailing-only (§11.1), the
 list/cons sugar desugaring (§11.5), the string-literal desugaring
-(§9), the
+(§9), the character-literal desugaring (§9, issue #12), the
 §11.10 top-level grammar (see the loader's header), and the §6.4
 default-`Error`-machine installation rule.
