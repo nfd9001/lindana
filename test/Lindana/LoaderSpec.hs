@@ -261,6 +261,21 @@ spec = do
       said `shouldBe` ["got 3", "ok", "Ok"]
       rrExit rr `shouldBe` ExitSuccess
 
+  describe "bytesRead: the identity invariant e2e (§9, issue #12)" $ do
+    it "bytesRead of a bind matches the original string literal pattern" $ do
+      l <- loadOk $ unlines
+        [ ": [bytesBind Word \"Ok\"; (Go,)]"
+        , "(Bytes, Word), (Go,) : (Read, bytesRead(Word))"
+        -- the read-back list IS the codepoints "Ok" builds, so the
+        -- string-literal pattern matches structurally — the issue's
+        -- "string in and out of ByteString is the identity" invariant
+        , "(Read, \"Ok\") : [say \"bytesRead round-trips; matched the \\\"Ok\\\" pattern\"; (Done,)]"
+        , "(Done,) : exit 0"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["bytesRead round-trips; matched the \"Ok\" pattern"]
+      rrExit rr `shouldBe` ExitSuccess
+
 -- | Run loaded, capturing @say@ output and the result.
 --
 -- House rule, learned the hard way in the §9 e2e tests: a program

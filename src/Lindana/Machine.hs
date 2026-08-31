@@ -276,7 +276,11 @@ evalR rts env = evalExprG (rtsBuiltin rts) env
 -- With casual-string sugar (§9), @atomize@ consumes a codepoint
 -- cons-list and decodes it ('casualString') before the capitalization
 -- check; @atos@ hands back a casual string ('stringVal') — there is
--- no Str type (§11.4).
+-- no Str type (§11.4). @bytesEqual@ compares contents via the
+-- side-table; @bytesRead@ is the decode-back path (§9, issue #12):
+-- the handle's bytes decoded as UTF-8 into the codepoint cons-list
+-- the bind consumed, so a string run in and out of the side-table is
+-- the identity.
 rtsBuiltin :: RTS -> Name -> [Val] -> STM Val
 rtsBuiltin rts name args = case (name, args) of
   ("rand", [VInt n])
@@ -299,6 +303,23 @@ rtsBuiltin rts name args = case (name, args) of
     case (Map.lookup x m, Map.lookup y m) of
       (Just a, Just b) -> pure (VInt (if a == b then 1 else 0))
       _ -> error ("bytesEqual: unknown bytestring handle(s): " ++ x ++ ", " ++ y)
+  -- §9 (issue #12, bullet 3): the identity invariant — bytes go in via
+  -- @bytesBind@, the same codepoints come back out. The result is the
+  -- exact shape @bytesBind@ consumed (a 'stringVal' cons-list), so
+  -- @bytesBind H l … bytesRead(H)@ round-trips @l@ unchanged and
+  -- structural matching against a string/char/list literal pattern
+  -- just works. Missing handle or invalid UTF-8: provisional Haskell
+  -- errors, same routing as @bytesEqual@ and @%b@ (unified error
+  -- routing pending, §3.3/§7.3). Invalid UTF-8 is unreachable through
+  -- @bytesBind@ (it only registers 'encodeUtf8' of codepoints) — the
+  -- check is for symmetry with @%b@ and any future byte source.
+  ("bytesRead", [VAtom h]) -> do
+    m <- readTVar (rtsBytes rts)
+    case Map.lookup h m of
+      Nothing -> error ("bytesRead: unknown bytestring handle " ++ h)
+      Just bs -> case decodeUtf8' bs of
+        Right txt -> pure (stringVal (T.unpack txt))
+        Left _    -> error ("bytesRead: bytestring " ++ h ++ " is not valid UTF-8")
   _ -> error ("evalExpr: unknown builtin or bad arity: " ++ name)
 
 capitalized :: String -> Bool

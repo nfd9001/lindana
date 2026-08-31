@@ -76,7 +76,7 @@ reservedWords = Set.fromList
   , "say", "exit", "die", "quit", "sleep"
   , "lob", "error", "panic"
   , "rand", "typeOf", "atomize", "atos"
-  , "bytesBind", "bytesDestroy", "bytesEqual"
+  , "bytesBind", "bytesDestroy", "bytesEqual", "bytesRead"
   ]
 
 -- | Whitespace consumer. At depth 0: spaces, tabs, CRs and @--@ line
@@ -362,7 +362,7 @@ charExpr = do
 callP :: Parser Expr
 callP = choice
   [ rword (T.pack n) *> (ECall n <$> grouped '(' ')' (exprP `sepBy` symbolT ","))
-  | n <- ["rand", "typeOf", "atomize", "atos", "bytesEqual"] :: [String]
+  | n <- ["rand", "typeOf", "atomize", "atos", "bytesEqual", "bytesRead"] :: [String]
   ]
 
 -- | Parenthesised expression: with no comma it is grouping, with a

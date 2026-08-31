@@ -96,10 +96,13 @@ multi-codepoint `'…'` is a parse error — use a string), Terse bracketed
 sequences `[a; b]`, `if/then/else`, verbs
 (`say` with `%b` for bytestring handles, `exit`, `die`/`quit`,
 `sleep`, `lob`, `error`, `panic`, `bytesBind`, `bytesDestroy`),
-builtin calls (`rand`, `typeOf`, `atomize`, `atos`, `bytesEqual`),
+builtin calls (`rand`, `typeOf`, `atomize`, `atos`, `bytesEqual`,
+`bytesRead`),
 initial-bag blocks, named bag blocks, the §9 bytestring side-table
 (opaque atom handles; `==` is pure atom identity, `bytesEqual`
-compares contents; binds emit a `(Bytes, H)` completion tuple).
+compares contents; binds emit a `(Bytes, H)` completion tuple;
+`bytesRead` decodes a handle back into the codepoint list — a string
+in and out of ByteString is the identity, §9/issue #12).
 Effect bundles need no syntax (§11.6, provisionally resolved): a
 reaction's post-commit action list *is* the bundle.
 
