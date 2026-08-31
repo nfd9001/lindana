@@ -207,10 +207,12 @@ rtsBuiltin rts name args = case (name, args) of
     | n <= 0    -> pure (VInt 0)   -- provisional: rand of non-positive is 0
     | otherwise -> do
         s <- readTVar (rtsSeed rts)
-        let s' = (6364136223846793005 * s + 1442695040888963407)
-                   `mod` (2 ^ (64 :: Integer))
+        let s' = (randMult * s + randInc) `mod` randModulus
         writeTVar (rtsSeed rts) s'
-        pure (VInt (s' `mod` n))
+        -- Sample the HIGH half for the result: LCG low bits have tiny
+        -- periods (bit k has period 2^k), so taking `s' mod n` would
+        -- make rand(2) alternate 0,1,0,1 deterministically.
+        pure (VInt ((s' `div` (2 ^ (32 :: Integer))) `mod` n))
   ("typeOf", [v])     -> pure (VAtom (typeTag v))
   ("atomize", [VStr s])
     | capitalized s   -> pure (VAtom s)
@@ -221,6 +223,16 @@ rtsBuiltin rts name args = case (name, args) of
 capitalized :: String -> Bool
 capitalized (c : _) = c `elem` ['A' .. 'Z']
 capitalized []      = False
+
+-- | @rand@'s LCG parameters: Knuth's MMIX generator (TAOCP 2, §3.3.4)
+-- — multiplier 6364136223846793005, increment 1442695040888963407,
+-- modulus 2^64. Hull–Dobell: full period 2^64. Provisional — the
+-- cheapest generator that's decent; swap for e.g. splitmix if rand
+-- quality ever matters.
+randMult, randInc, randModulus :: Integer
+randMult     = 6364136223846793005
+randInc      = 1442695040888963407
+randModulus  = 2 ^ (64 :: Integer)
 
 typeTag :: Val -> Name
 typeTag VAtom{}   = "Atom"

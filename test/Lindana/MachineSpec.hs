@@ -215,6 +215,23 @@ spec = do
       all (\n' -> n' >= 0 && n' < 10) rolls `shouldBe` True
       rrBag r2 `shouldBe` rrBag r1
 
+    it "rand(2) is not a strict alternator (high-bit sampling)" $ do
+      -- LCG low bits have period 2; sampling them for rand(2) yields a
+      -- perfect 0,1,0,1… alternation. Draw four coins and require
+      -- three consecutive identical values (impossible under strict
+      -- alternation); deterministic under the fixed seed.
+      let roller = machine (take1 (p1 "Roll"))
+            [ Out (t [ EAtom "C1", ECall "rand" [int 2]
+                     , ECall "rand" [int 2]
+                     , ECall "rand" [int 2]
+                     , ECall "rand" [int 2] ])
+            , Die ]
+      r <- runProgram [roller] [t [EAtom "Roll"]]
+      let coins = [c | VTuple (VAtom "C1" : cs) <- rrBag r
+                     , VInt c <- cs]
+      length coins `shouldBe` 4
+      coins `shouldSatisfy` (\cs' -> or (zipWith (==) cs' (drop 2 cs')))
+
     it "atomize/atos round-trip (§4)" $ do
       let m = machine (take1 (p1 "Go"))
             [ Out (t [ ECall "atos" [ECall "atomize" [EStr "Foo"]]
