@@ -416,3 +416,82 @@ Takes the last open bullet of issue #12 (the “identity invariant”), as scope
 - **Examples**: `examples/bytes.lind` — a `(Read,)` → `(RoundTrip, bytesRead(Greeting))` → `(RoundTrip, "Hi")` chain demonstrating the identity end-to-end (gate note: the bind has certainly landed by `(Read,)` — the `%b` say above already decoded it); verified via CLI and `--parse` round-trip.
 - **Issue #12 closed**: char sugar (§13.10) + this slice cover all three bullets. Still open in §11: mixed int/double arithmetic (§11.3), effect-runner scope (§11.7), `die` vs `quit` (§11.9), bytestring reclamation (§11.11), fresh-name generation for a dynamic `bytesNew` (§9), unified error routing (§3.3/§7.3) — plus the house-wide parser-error-message plumbing noted in §13.10.
 
+
+### 13.12 Done — Brainfuck interpreter example (§9, §11.5, §3.1, §3.2, §12), branch `examples/brainfuck`
+
+`examples/brainfuck.lind` — a bounded-nothing, bounded-nothing… a
+Brainfuck interpreter written entirely as Lindana machines; no runtime
+or parser changes were needed (the language as of §13.11 was already
+sufficient — the example is the stress test). It runs the classic
+input-free "Hello World!" and exits 0.
+
+- **Architecture** (header-commented in the file): an init `Scan`
+  machine walks the casual-string program literal once, building a
+  bracket jump table (open/close position pairs — order-free, lookup
+  walks it with `==`) and the program as a cons-list (accumulated
+  reversed). A generic `Rev` machine straightens lists, CPS-style: its
+  last slot is a continuation tuple spliced in with `!` at the bottom
+  (§4) — the same Rev serves both the scanned program (→ `BfInit`) and
+  the output (→ `Fin`). The stepper `Bf` holds
+  `(ip, cur, before, after, left, right, out)`: the program and the
+  tape are both zippers; dispatcher machines are keyed on the
+  instruction character at the head of `After`, all watching the one
+  evolving state tuple. Jumps: `FindF`/`FindB` walk the pair table,
+  `MoveF`/`MoveB` shuffle the program zipper by counter.
+- **The tape is lazy and unbounded in both directions** (suggested by
+  the project owner, and the funny consequence of the zipper
+  strategy): an empty side just conses a fresh 0 cell, so there is no
+  tape allocation step and no edge — a runaway `[<]`/`[>]` scan now
+  allocates forever instead of hitting an edge (documented hazard, not
+  guarded, §12 style). No `,` (no stdin verb) and no comment
+  characters: a program containing either deadlocks the matching
+  machine, which the CLI reports; stripping comments race-free would
+  need a non-racing catch-all pattern, which the matcher deliberately
+  doesn't have.
+- **Deterministic despite the substrate**: because the dispatcher
+  rules are keyed on distinct instruction literals, no two machines'
+  patterns overlap — exactly one machine can fire per state tuple.
+  Chaos is opt-out (§12), and the interpreter opts out.
+- **Pattern-vs-branch lesson (generalizable)**: counter walkers must
+  put their base case in an `if` in the body, NOT in a
+  base-case-rule + general-rule pair — at the boundary value both
+  patterns match and the §3.1 race picks a winner (a missed base case
+  walks the counter past zero and never terminates the walk). All of
+  `MoveF`/`MoveB` (base `n != 1`) and any "walk until" logic do this.
+- **PRest races zero (§11.1 consequence)**: a rest capture matches
+  *zero-or-more* elements, so an `st!`-shaped error rule races the
+  `[]`-shaped success rule on the very state it means to exclude
+  (Scan's "unmatched [" end rule). Nonempty-stack as a *pattern* must
+  be the cons shape `[p | st]`, not a rest capture. Worth remembering
+  for any future "rest capture but at least one" want.
+- **PRest double-wraps continuations**: capturing a CPS continuation
+  with `k!` wraps it in a sub-tuple *every* hop including the final
+  capture, so the bottom splice produces a wrapped value nobody
+  matches. Pass the continuation as a plain variable (PVar binds the
+  whole value) and splice only at the bottom — `Rev` does this.
+- **Zipper-jump subtlety**: a backward jump consumes the `]` in the
+  dispatcher, and the jump shuffle must therefore cons `']'` back onto
+  `Before` and move `ip - p + 1` chars so the `]` lands back at its
+  position — otherwise a second pass through the loop walks straight
+  past where it was and the ip threading desyncs (deadlock). The
+  forward skip already preserved its `[` (FindF's found branch conses
+  it before MoveF runs).
+- **Debugging tale, recorded as a hazard**: mid-session misbehavior
+  was traced by adding `say`s to the dispatcher rules — which
+  deadlocked everything, because `say "no specifier" arg` throws
+  "say: too many arguments" *inside the effect-runner thread*, killing
+  it silently; every later effect (including `exit`) never runs and
+  the run ends as a CLI-reported deadlock. Same provisional
+  Haskell-error routing as `%b`/handle misses (§3.3/§7.3 unified error
+  routing thread — this is another data point for it).
+- **Verification**: Hello World deterministically over repeated runs;
+  micro-programs `+++.` / `+++++---.` / `++[>+++++<-]>.` (10) /
+  `++[>++[>+++<-]<-]>>.` (12, nested) / `++++++[>++++++++++<-]>+++++.`
+  ('A'); unbounded-tape probes 30 cells right and 32 cells *left* of
+  cell 0; `,`-containing program deadlocks as documented. `--parse`
+  round-trip is a fixed point; full suite green (122 cases,
+  randomized); zero new warnings (no Haskell changes).
+- **Remaining threads**: unchanged from §13.11 (§11.3, §11.7, §11.9,
+  §11.11, fresh-name generation, unified error routing — now with an
+  extra data point, the effect-runner's silent death on `say` format
+  errors).
