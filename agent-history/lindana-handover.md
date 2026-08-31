@@ -263,7 +263,7 @@ Note: this predates several later decisions (e.g. atom quoting was inconsistent 
 
 Roughly in order of how foundational they are:
 
-1. **Pattern-side `!` rest-capture** — wanted, exact syntax not written (§4).
+1. **Pattern-side `!` rest-capture** — **provisionally resolved** (§13.4, branch `runtime/machine-loop-actions`): trailing-only, var-only (`var!` as the last element of a tuple pattern; parser enforces), zero-or-more elements so `(c!)` matches any tuple — the shape the §6.4 default `Error` machine needs. Mid and trailing capture resolved as **mutually exclusive without language extensions**: under the natural "find an assignment" reading, a mid capture leaves the alignment of intervening fixed elements indeterminate (where does `c` sit in `(a, b!, c, d!)?`). A deterministic greedy-left/backtracking multi-slice strategy was considered and deliberately deferred — "a funny option with good footguns" — recorded in `agent-history/messageboard/multi-slice-rest-capture-future.txt`. Implementation: `PRest Name` in Syntax, `matchTuple` in Runtime, tests in RuntimeSpec/Spec/MachineSpec.
 2. **Repeated variables within one pattern** — does `(a, a)` require equality between the two positions (Prolog-style), or is it a rebind/shadow? Raised, never resolved.
 3. **Mixed int/double arithmetic** — auto-promote, or a type error via `error`? (§9)
 4. **Char type vs. plain Ints** for string sugar — posed, not confirmed either way (§9).
@@ -317,4 +317,26 @@ Roughly in dependency order:
 2. **Action layer** (§3.3, §7): the verbs (`out`, `lob`, `say`, `exit`, `sleep`, `panic`, `error`, `if`) as post-commit action lists; effect-runner thread with a `TQueue` of bundles (§7.2). Builtins like `rand` land here too.
 3. **Named bags + `lob`** (§6): mostly wiring multiple `RBag`s; cross-bag atomicity is free (one `atomically` spans `TVar`s). Machineless-bag accumulation (§6.2) and the atomic drain-on-first-machine handoff are the interesting bits.
 4. **Program loader**: `Program`/`Decl` AST → runtime wiring; resolve the §11.10 top-level grammar question on the way.
+
+### 13.4 Done — machine loop/scheduler + action layer + effect-runner (§1, §2, §7.2), branch `runtime/machine-loop-actions`
+
+New module `src/Lindana/Machine.hs` (off `main`, on top of a fast-forward of `runtime/stm-bag-matcher`):
+
+- **Machine loop/scheduler** (§13.3 step 1): one thread per machine; loop = blocking join (`matchJoinSTM` + `retry`) → interpret body → re-arm. `die` ends the thread; empty-pattern machines fire once at start with empty env (§1) and terminate. Nothing done to *prevent* §5's `AContN` cross-invocation chaos — it falls out of the loop, as predicted.
+- **Action layer** (§13.3 step 2), two-phase per the §8.2 note: the interpreter runs /inside/ the matching transaction. Tuple-space verbs (`out`, `lob`, and `error`'s Error-tuple write) execute there — so a machine's tuple writes commit atomically with its match. Every irrevocable verb comes back as a deferred `Effect` bundle, pushed to a `TQueue` after commit; a **single global effect-runner** thread (§7.3 provisionally global) drains FIFO, one bundle live at a time (§7.2). No rollback on partial failure, per §7.2.
+- **Builtins evaluate in STM** (via a generalized `evalExprG` in Runtime, carrier `f ~ STM` in the action layer, `f ~ Identity` in the pure core): `rand` uses the `random` package's splitmix-backed `StdGen` — pure `uniformR` step with the generator in a `TVar`, so `rand` inside a machine's decision keeps the whole "match → decide → re-emit" step atomic (§8.2's requirement), with unbiased bounded ranges and deterministic runs (fixed `mkStdGen 12345` seed). An earlier hand-rolled MMIX-constant LCG sampled low bits and made `rand(2)` a strict 0,1,0,1 alternator — replaced by the library call (there's a regression test). `typeOf`, `atomize`, `atos` in. `atomize`'s §4 `panic`-on-lowercase is provisionally a Haskell-level `error` (kills the machine thread) pending the effect-bundle grammar (§11.6).
+- **`exit` = program termination** with evaluated code (provisional; §10's two uses read that way); `die` = machine-only. `panic` = message to a hook + `ExitFailure 1`. `error` verb = degenerate pre-§6 form: emits an `(Error, …)` tuple into the main bag (tuple argument spliced). **No default `Error` machine installed** — its pattern needs rest-capture (§11.1); unmatched Error tuples just sit.
+- **`lob` preview** (§6.2): lobbing to a not-yet-known bag creates a machineless accumulator (`Map Name RBag` in the RTS) — the free logging sink works today; matching *into* named bags waits for §6 proper.
+- **Provisional truthiness** (§9/§11): falsy = `0`, `0.0`, `False`; everything else (including `()`) truthy.
+- **Effect-runner shutdown** (found by test, now a firm contract): cancelling the runner dropped bundles mid-`sleep`. Instead: machines are cancelled, then a `rtsStop` flag makes the runner finish its current bundle and drain the queue — **every queued bundle fully executes before `runProgram` returns**. Residual provisional hazard: a machine cancelled between committing a match and queueing its bundle loses it (tiny window; a real shutdown contract is an open question worth adding to §11).
+- **Fixed LCG seed** (12345): deterministic runs — reproducible chaos. Provisional.
+- **Truthiness**: falsy = `VInt 0`, `VDouble 0.0`, `VAtom "False"`; everything else truthy, including `()`. Provisional (§11 open).
+- **Effect-bundle syntax** (§11.6): still unwritten — the RTS speaks in `MachineDef`s/`Action`s directly; the loader will map AST → these.
+
+Tests: 16 new cases in `test/Lindana/MachineSpec.hs` (loop/one-shot/loop-until-die, continuation pipelines, effect ordering, die-drops-rest, two-phase split, exit/panic/error routing, builtins, lob accumulation); 43 total green, randomized order, 5× repeat stable.
+
+### 13.5 Next steps (revised §13.3)
+
+3. **Named bags + `lob`** (§6): `rtsBags` already accumulates machineless bags; remaining: machines declared inside a bag match *that* bag (machine declarations need bag scoping), plus the atomic drain-on-first-machine handoff (§6.2) and the `Error` default machine.
+4. **Program loader**: `Program`/`Decl` AST → `MachineDef`s + initial tuples via `runProgram`; resolve §11.10 (top-level grammar) on the way.
 

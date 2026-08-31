@@ -9,8 +9,8 @@
 -- permitted after the structural separators @:@, @then@ and @else@ so
 -- multi-line Terse machines like the §8.2 throttling example parse.
 --
--- Deliberately not yet implemented (open questions §11): pattern-side
--- rest-capture, list literal/pattern sugar, effect bundles.
+-- Deliberately not yet implemented (open questions §11): list
+-- literal/pattern sugar, effect bundles.
 module Lindana.Parser
   ( parseProgram
   , PError
@@ -184,10 +184,34 @@ patternP = choice
   ]
 
 -- | Tuple pattern. A trailing comma marks arity, e.g. @(Tick,)@;
--- @()@ is the empty tuple. (Pattern-side @!@ rest-capture is wanted
--- but unsyntaxed — handover §4 / §11.1.)
+-- @()@ is the empty tuple. An element followed by @!@ is a rest
+-- capture (§11.1, provisionally resolved): it must be a variable
+-- (@var!@ — a capture needs somewhere to bind) and it must be the
+-- LAST element. Mid and trailing capture are mutually exclusive
+-- without language extensions: mid captures make the alignment of
+-- intervening fixed elements indeterminate under the natural
+-- "find an assignment" reading (e.g. where does @c@ sit in
+-- @(a, b!, c, d!)@?). The trailing form needs no such reasoning —
+-- "everything after position N".
 tuplePat :: Parser Pat
-tuplePat = grouped '(' ')' (PTuple <$> (patternP `sepEndBy` symbolT ","))
+tuplePat = grouped '(' ')' $ do
+  ps <- patElem' `sepEndBy` symbolT ","
+  trailingOnly ps
+  pure (PTuple ps)
+  where
+    patElem' = do
+      p <- patternP
+      spliced <- isJust <$> optional bangSym
+      case (spliced, p) of
+        (False, _)      -> pure p
+        (True, PVar n)  -> pure (PRest n)
+        (True, _)       -> fail "pattern rest-capture binds a variable: write var! (§11.1)"
+    -- Any PRest must be the final element.
+    trailingOnly []       = pure ()
+    trailingOnly [_]      = pure ()
+    trailingOnly (PRest _ : _) =
+      fail "mid rest-capture: only trailing capture is supported (§11.1)"
+    trailingOnly (_ : ps) = trailingOnly ps
 
 patElemP :: Parser PatElem
 patElemP = choice

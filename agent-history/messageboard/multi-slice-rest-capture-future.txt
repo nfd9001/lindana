@@ -1,0 +1,68 @@
+FUTURE OPTION — multi-slice rest-capture via greedy backtracking
+================================================================
+
+Status:   NOT IMPLEMENTED. Deliberately deferred during the §11.1
+          trailing-rest-capture work (branch runtime/machine-loop-
+          actions). Recorded here so the idea doesn't have to be
+          rediscovered; take it up only if a real program needs it.
+
+Context:  §11.1 was provisionally resolved as trailing-only, var-only
+          rest capture: one `var!` per tuple pattern, final position,
+          zero-or-more elements. Mid capture was rejected because,
+          under the natural "find an assignment" reading, a pattern
+          like (a, b!, c, d!) leaves the alignment of the fixed
+          elements (where does `c` sit?) indeterminate, and mid and
+          trailing capture were resolved to be mutually exclusive
+          without language extensions.
+
+The deferred option (as sketched in session discussion):
+
+  Allow MULTIPLE rest captures per pattern (mid and trailing alike)
+  with a deterministic slicing strategy:
+
+    - Each capture is GREEDY, taken LEFT TO RIGHT.
+    - After each greedy slice, BACKTRACK the last capture's width
+      until every non-`!` (fixed) element of the pattern finds a
+      binding.
+
+  e.g.  ("log", msg!, level)   vs   ("log", "x", "y", 3)
+        msg! greedily takes ("x", "y", 3), backtracks until `level`
+        binds → msg! = ("x", "y"), level = 3.
+
+Why it was not implemented:
+
+  - Nothing in the current design needs it. Trailing-only covers the
+    known consumers: the §6.4 default Error machine `(c!) : panic c`,
+    and cons-tail capture for the §9 list sugar (`(Cons, H, T!)`).
+  - Backtracking-in-the-matcher is a real semantics change: §3.2
+    says matching is commitment — match success and commitment are
+    the same event. A backtracking matcher would need a guarded
+    trial phase for the slice search before commitment, which cuts
+    against the "no guard/rollback concept" resolution unless very
+    carefully framed (the search is internal to one structural
+    match, but it still means a pattern can fail *after* partially
+    binding — observable only via error messages, since nothing
+    outside the match sees intermediate envs).
+  - It is, verbatim, "a funny option with good footguns": greedy
+    left-to-right with backtracking is deterministic but deeply
+    surprising to reason about (the binding of an earlier capture
+    depends on later fixed elements). That is arguably ON BRAND for
+    a language about races — which is exactly why it is written down
+    here instead of being dismissed.
+
+If picked up later:
+
+  - Parser: drop the trailingOnly check in tuplePat (Parser.hs),
+    keep var-only.
+  - Matcher: replace matchTuple's single-PRest case with the greedy
+    backtrack search over capture widths (Runtime.hs). Requires the
+    §3.2 framing decision above to be made explicitly in the
+    handover first.
+  - Handover: §11.1 and §12 ("matcher checks structure") both need
+    amending; add tests for capture-dependent alignment, including
+    the case where two different alignments of the same fixed
+    elements are possible and greedy-left must pick the earliest
+    split that lets all fixed elements bind.
+
+Full context: lindana-handover.md §11.1 and the trailing-capture
+decision note in §13.

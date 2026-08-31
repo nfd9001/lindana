@@ -185,6 +185,43 @@ spec = do
       taken `shouldBe` n
       bagContents bag `shouldReturn` []
 
+  describe "trailing rest capture (§11.1, provisional)" $ do
+    let cap = PRest   -- shorthand below: rest! is PRest "rest" etc.
+
+    it "captures the remaining elements as a sub-tuple" $ do
+      r <- matchOne (PTuple [a "Ping", v "first", cap "rest"])
+                    (t [atom "Ping", VInt 1, VInt 2, VInt 3])
+      fmap matchEnv r `shouldBe` Just (Map.fromList
+        [ ("first", VInt 1), ("rest", t [VInt 2, VInt 3]) ])
+
+    it "captures zero elements when the tuple is exhausted (zero-or-more)" $ do
+      r <- matchOne (PTuple [a "Ping", cap "rest"]) (t [atom "Ping"])
+      fmap matchEnv r `shouldBe` Just (Map.fromList [("rest", t [])])
+
+    it "(c!) matches any tuple, capturing the whole thing (the Error shape)" $ do
+      r1 <- matchOne (PTuple [cap "c"]) (t [atom "Bad", VInt 7])
+      fmap matchEnv r1 `shouldBe`
+        Just (Map.fromList [("c", t [atom "Bad", VInt 7])])
+      r2 <- matchOne (PTuple [cap "c"]) (t [])
+      fmap matchEnv r2 `shouldBe` Just (Map.fromList [("c", t [])])
+
+    it "does not match a non-tuple (matcher stays structural, §3.2)" $ do
+      r <- matchOne (PTuple [cap "c"]) (atom "Foo")
+      r `shouldSatisfy` matchesFail
+
+    it "a capture name repeated with a plain element honours §11.2 equality" $ do
+      -- (n, n!): the capture is checked against the earlier binding
+      -- rather than overwriting it. n! is a TUPLE of the remaining
+      -- elements, so the first element must equal that sub-tuple:
+      --   ((X, Y), X, Y):  n = (X, Y), n! = (X, Y)  → equal
+      --   ((X, Y), X, Z):  n! = (X, Z)              → different
+      r1 <- matchOne (PTuple [v "n", cap "n"])
+                     (t [t [atom "X", atom "Y"], atom "X", atom "Y"])
+      r1 `shouldSatisfy` matchesSucceed
+      r2 <- matchOne (PTuple [v "n", cap "n"])
+                     (t [t [atom "X", atom "Y"], atom "X", atom "Z"])
+      r2 `shouldSatisfy` matchesFail
+
   describe "expression evaluation (construction side)" $ do
     let env = Map.fromList
           [ ("a", VInt 20), ("b", VInt 22)
