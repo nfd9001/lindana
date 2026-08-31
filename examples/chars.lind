@@ -1,0 +1,21 @@
+-- §9 character sugar (issue #12): 'x' is parse-time sugar for the
+-- codepoint Int — plain Ints all the way down (§11.4); '' is a synonym
+-- for the Nil atom; wrapping multiple codepoints ('ab') is a parse
+-- error — use a string. Chars are ordinary Ints, so they cons into
+-- lists, match structurally, and build bytestrings like any other
+-- codepoints.
+
+{ ('A', 3) }
+
+-- the char in this pattern desugars to 65, the same Int the literal in
+-- the initial tuple above becomes, so they match structurally
+('A', n) : [say "got %i" n; (Next,)]
+
+-- chars cons up into a casual string; %s decodes the codepoint list
+(Next,) : (Built, ['o', 'k'])
+(Built, cs) : [say "%s" cs; (Bind,)]
+
+-- promoting one to a real UTF-8 bytestring: bytesBind H <codepoints>,
+-- gated on the (Bytes, H) completion tuple (§9)
+(Bind,) : [bytesBind Word ['O', 'k']; (Fin,)]
+(Bytes, Word), (Fin,) : [say "%b" Word; exit 0]

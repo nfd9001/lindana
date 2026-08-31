@@ -247,6 +247,20 @@ spec = do
         ["(ContentNeq)", "(DifferentAtoms)"]
       rrExit r `shouldBe` ExitSuccess
 
+  describe "character sugar e2e (§9, issue #12)" $ do
+    it "char literals match, cons into strings, and build bytestrings" $ do
+      l <- loadOk $ unlines
+        [ "{ ('A', 3) }"
+        , "('A', n) : [say \"got %i\" n; (Next,)]"
+        , "(Next,) : (Built, ['o', 'k'])"
+        , "(Built, cs) : [say \"%s\" cs; (Bind,)]"
+        , "(Bind,) : [bytesBind Word ['O', 'k']; (Fin,)]"
+        , "(Bytes, Word), (Fin,) : [say \"%b\" Word; exit 0]"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["got 3", "ok", "Ok"]
+      rrExit rr `shouldBe` ExitSuccess
+
 -- | Run loaded, capturing @say@ output and the result.
 --
 -- House rule, learned the hard way in the §9 e2e tests: a program

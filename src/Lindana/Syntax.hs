@@ -4,13 +4,14 @@
 --
 -- This is a shell: syntax is illustrative pending the real grammar pass
 -- (see lindana-handover.md §4). Not modelled yet: Terse->Restricted
--- desugaring. List/cons sugar (§11.5, provisional) and casual-string
--- sugar (§9, provisional) are not AST nodes: the parser desugars
--- @[a, b, c]@ to nested 2-tuples ending in the @Nil@ atom, and
--- @"..."@ to a cons-list of codepoint ints (the same shape — plain
--- Ints all the way down, §11.4), at parse time, so the pretty-printer
--- renders the desugared tuple form — which round-trips. There is no
--- effect-bundle syntax and none is needed (§11.6, provisionally
+-- desugaring. List/cons sugar (§11.5, provisional), casual-string
+-- sugar (§9, provisional), and character sugar (§9, issue #12) are not
+-- AST nodes: the parser desugars @[a, b, c]@ to nested 2-tuples ending
+-- in the @Nil@ atom, @"..."@ to a cons-list of codepoint ints (the
+-- same shape — plain Ints all the way down, §11.4), and @'x'@ to the
+-- single codepoint Int (@''@ to @Nil@) at parse time, so the
+-- pretty-printer renders the desugared forms — which round-trip. There
+-- is no effect-bundle syntax and none is needed (§11.6, provisionally
 -- resolved): the bundle is a machine reaction's post-commit action
 -- list, a runtime concept — see "Lindana.Machine".
 module Lindana.Syntax

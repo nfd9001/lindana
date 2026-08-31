@@ -20,9 +20,12 @@
 -- @\"...\"@ in expression or pattern position desugars to a cons-list
 -- of codepoint ints — the same shape the list literal builds; plain
 -- Ints all the way down, no Char type (§11.4, provisionally resolved).
--- Both are purely syntactic — the AST has no list or string nodes, so
--- the pretty-printer renders the desugared tuple form (which
--- round-trips). The one string literal that survives as a raw
+-- Character sugar (§9, issue #12) completes the picture: @'x'@ is the
+-- single codepoint as a plain Int, @''@ is a synonym for @Nil@, and
+-- multiple codepoints wrapped in @''@ are a parse error (use a
+-- string). All three are purely syntactic — the AST has no list,
+-- string, or char nodes, so the pretty-printer renders the desugared
+-- form (which round-trips). The one string literal that survives as a raw
 -- 'String' is @say@'s format: that position is not an expression, the
 -- action consumes the literal as a format.
 module Lindana.Parser
@@ -205,7 +208,38 @@ patternP = choice
   , PDouble <$> doubleLit
   , PInt    <$> intLit
   , strPat
+  , charPat
   ]
+
+-- | Character literal, escapes resolved: the contents between two
+-- quotes. Empty is legal (@''@ — the issue #12 Nil synonym); more than
+-- one codepoint is the caller's parse error (use a string, §9).
+charLit :: Parser String
+charLit = lexeme $ do
+  _ <- char '\''
+  manyTill (cescape <|> noneOf ("'\\" :: String)) (char '\'')
+  where
+    cescape = char '\\' *> choice
+      [ '\n' <$ char 'n'
+      , '\t' <$ char 't'
+      , '\'' <$ char '\''
+      , '\\' <$ char '\\'
+      ]
+
+-- | Character sugar (§9, issue #12, provisional): @'+'@ desugars to
+-- the plain codepoint Int @43@ — no Char type, plain Ints all the way
+-- down (§11.4) — so @'a'@ IS @97@ and builds lists and bytestrings
+-- like any other codepoint. @''@ is a synonym for the @Nil@ atom (an
+-- empty char is an empty something). Wrapping multiple codepoints is a
+-- parse error — that's what string sugar is for (§9). No AST node:
+-- the renderer emits the desugared form.
+charPat :: Parser Pat
+charPat = do
+  cs <- charLit
+  case cs of
+    []  -> pure (PAtom "Nil")
+    [c] -> pure (PInt (toInteger (ord c)))
+    _   -> fail "multiple codepoints in '…' — use a string (§9)"
 
 -- | Casual-string pattern sugar (§9, provisional): @\"add\"@
 -- desugars to the codepoint cons-list pattern @(97, (100, (100, Nil)))@ —
@@ -296,6 +330,7 @@ primP = choice
   , parenExpr
   , listExpr
   , strExpr
+  , charExpr
   , EDouble <$> doubleLit
   , EInt    <$> intLit
   , EAtom   <$> atomIdent
@@ -311,6 +346,16 @@ primP = choice
 strExpr :: Parser Expr
 strExpr = (foldr (\c e -> ETuple [EInt (toInteger (ord c)), e]) (EAtom "Nil"))
             <$> stringLit
+
+-- | Character sugar in expression position — see 'charPat' (the
+-- desugaring is the same, over 'Expr').
+charExpr :: Parser Expr
+charExpr = do
+  cs <- charLit
+  case cs of
+    []  -> pure (EAtom "Nil")
+    [c] -> pure (EInt (toInteger (ord c)))
+    _   -> fail "multiple codepoints in '…' — use a string (§9)"
 
 -- | Builtin function application: @rand(n)@, @typeOf(x)@, @atomize s@,
 -- @atos a@.
