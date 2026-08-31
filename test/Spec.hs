@@ -134,6 +134,39 @@ main = hspec $ do
       it "round-trips through the pretty-printer (rendered as the desugared tuples)" $
         roundTrips "{ ([1, 2, 3],) }\n([],) : die" `shouldBe` True
 
+    -- §9 casual-string sugar (provisional): literals are parse-time
+    -- sugar over codepoint cons-lists — the same shape the §11.5 list
+    -- literal builds; plain Ints all the way down (§11.4). No AST
+    -- nodes, so rendering shows the desugared form (round-trip
+    -- friendly). say's format literal is the one raw survivor: that
+    -- position is not an expression.
+    describe "casual-string sugar (§9)" $ do
+      let cons h t' = ETuple [h, t'] :: Expr
+          nil = EAtom "Nil" :: Expr
+          strE :: String -> Expr
+          strE s = foldr (\c acc -> cons (EInt (toInteger (fromEnum c))) acc) nil s
+          strP :: String -> Pat
+          strP s = foldr (\c acc -> PTuple [PInt (toInteger (fromEnum c)), acc]) (PAtom "Nil") s
+      it "desugars a literal to a codepoint cons-list" $ do
+        p <- parseOk "{ (\"Hi\",) }"
+        progDecls p `shouldBe` [Initial [ETuple [strE "Hi"]]]
+      it "desugars the empty string to Nil" $ do
+        p <- parseOk "{ (\"\") }"
+        progDecls p `shouldBe` [Initial [ETuple [nil]]]
+      it "desugars a pattern literal to a codepoint cons-list pattern" $ do
+        p <- parseOk "(\"add\", a) : die"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [strP "add", PVar "a"])] [Die]]
+      it "resolves escapes before coding the codepoints" $ do
+        p <- parseOk "{ (\"a\\nb\",) }"
+        progDecls p `shouldBe` [Initial [ETuple [strE "a\nb"]]]
+      it "is the same shape as the list literal: [104, 105] IS \"hi\"" $ do
+        a1 <- parseOk "{ (\"hi\",) }"
+        a2 <- parseOk "{ ([104, 105],) }"
+        a1 `shouldBe` a2
+      it "round-trips through the pretty-printer (rendered as the desugared tuples)" $
+        roundTrips "{ (\"Hi\",) }\n(\"add\", x) : die" `shouldBe` True
+
     describe "bytestring side-table grammar (§9)" $ do
       it "parses bytesBind with a codepoint list literal" $ do
         p <- parseOk ": bytesBind Greeting [72, 105]"

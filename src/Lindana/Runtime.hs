@@ -50,9 +50,13 @@ module Lindana.Runtime
   , evalExpr
   , evalExprG
   , arith
+    -- * Casual strings (§9)
+  , casualString
+  , stringVal
   ) where
 
 import Control.Concurrent.STM
+import Data.Char (chr, ord)
 import Data.Functor.Identity (Identity (..))
 import Data.List (find, findIndex)
 import qualified Data.Map.Strict as Map
@@ -64,17 +68,47 @@ import Lindana.Syntax
 --------------------------------------------------------------------------------
 
 -- | Runtime values. Deliberately matching the pattern/expr literal
--- kinds in "Lindana.Syntax": no list or string primitive (§9 — those
--- are sugar over tuples), and no bytestring handles (those are just
--- 'VAtom's over the RTS's side-table, per §9 — see 'rtsBytes' in
--- "Lindana.Machine").
+-- kinds in "Lindana.Syntax": no list primitive (§9 — sugar over
+-- tuples), no string primitive (§9 — a casual string is a cons-list of
+-- codepoint ints, the same shape; see 'casualString'/'stringVal'), and
+-- no bytestring handles (those are just 'VAtom's over the RTS's
+-- side-table, per §9 — see 'rtsBytes' in "Lindana.Machine").
 data Val
   = VAtom Name
   | VInt Integer
   | VDouble Double
-  | VStr String
   | VTuple [Val]
   deriving (Eq, Show)
+
+-- | §9 casual strings, decoded: a cons-list of @VInt@ codepoints
+-- ending in the @Nil@ atom — exactly what a @\"...\"@ literal (§9
+-- parse-time sugar) or a @[a, b, c]@ list literal (§11.5) builds.
+-- There is no Char type and no Str type (§11.4, provisionally
+-- resolved: plain Ints all the way down); /decoding/ is the consuming
+-- action's job (§3.3), and this is that job for the actions the RTS
+-- ships (@say %s@, @atomize@, @bytesBind@). Malformed shapes and
+-- out-of-range codepoints are Haskell-level @error@s — unified
+-- @error@-verb routing pending (§3.3).
+casualString :: Val -> String
+casualString (VInt n)                  = [cpChar n]
+casualString (VTuple [VInt n, rest])   = cpChar n : casualString rest
+casualString (VTuple _) =
+  error "string: list elements must be codepoint ints (§9, §3.3)"
+casualString (VAtom "Nil")             = []
+casualString _ =
+  error "string: expected a codepoint cons-list (§9, §3.3)"
+
+-- | §9 casual strings, encoded: the inverse of 'casualString' — what
+-- @atos@ hands back, and the shape every string literal parses to.
+stringVal :: String -> Val
+stringVal = foldr (\c t -> VTuple [VInt (toInteger (ord c)), t]) (VAtom "Nil")
+
+-- Range check lives with the decoder, not the encoder: literals and
+-- sugar-built lists never carry an out-of-range codepoint, but data
+-- that arrived through the bag might.
+cpChar :: Integer -> Char
+cpChar n | 0 <= n && n <= 0x10FFFF = chr (fromInteger n)
+         | otherwise = error "string: codepoint out of range (0..0x10FFFF, §3.3)"
 
 -- | Bindings produced by a successful match.
 type Env = Map.Map Name Val
@@ -146,7 +180,6 @@ matchPat (PVar n) v env = case Map.lookup n env of
 matchPat (PAtom a) (VAtom b) env | a == b = Just env
 matchPat (PInt i) (VInt j) env | i == j = Just env
 matchPat (PDouble x) (VDouble y) env | x == y = Just env
-matchPat (PStr s) (VStr t) env | s == t = Just env
 matchPat (PTuple ps) (VTuple vs) env = matchTuple ps vs env
 -- A rest capture binds-or-checks exactly like a variable, except the
 -- value is always the sub-tuple of remaining elements — so a name
@@ -279,7 +312,6 @@ evalExprG builtin env e = case e of
   EAtom n      -> pure (VAtom n)
   EInt i       -> pure (VInt i)
   EDouble d    -> pure (VDouble d)
-  EStr s       -> pure (VStr s)
   ETuple es    -> VTuple . concat <$> traverse (evalElemG builtin env) es
   ESplice x    -> do  -- full-tuple splice (§4): flattens one level
     v <- evalExprG builtin env x

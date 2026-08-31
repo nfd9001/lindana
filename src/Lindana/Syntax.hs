@@ -4,10 +4,15 @@
 --
 -- This is a shell: syntax is illustrative pending the real grammar pass
 -- (see lindana-handover.md §4). Not modelled yet: Terse->Restricted
--- desugaring, effect bundles. List/cons sugar (§11.5, provisional) is
--- not an AST node: the parser desugars @[a, b, c]@ to nested 2-tuples
--- ending in the @Nil@ atom (and @[]@ to @Nil@) at parse time, so the
--- pretty-printer renders the desugared tuple form — which round-trips.
+-- desugaring. List/cons sugar (§11.5, provisional) and casual-string
+-- sugar (§9, provisional) are not AST nodes: the parser desugars
+-- @[a, b, c]@ to nested 2-tuples ending in the @Nil@ atom, and
+-- @"..."@ to a cons-list of codepoint ints (the same shape — plain
+-- Ints all the way down, §11.4), at parse time, so the pretty-printer
+-- renders the desugared tuple form — which round-trips. There is no
+-- effect-bundle syntax and none is needed (§11.6, provisionally
+-- resolved): the bundle is a machine reaction's post-commit action
+-- list, a runtime concept — see "Lindana.Machine".
 module Lindana.Syntax
   ( -- * AST
     Name
@@ -58,8 +63,10 @@ data Pat
   | PAtom Name                  -- ^ capitalized: atom
   | PInt Integer
   | PDouble Double
-  | PStr String
-  | PTuple [Pat]                -- ^ @()@, @(Tick,)@, @("add", a, b, c)@
+  | PTuple [Pat]                -- ^ @()@, @(Tick,)@, @("add", a, b, c)@ —
+                                --   string literals desugar (§9): a
+                                --   pattern @"add"@ arrives here as the
+                                --   codepoint cons-list @(97, (100, …))@.
   | PRest Name                  -- ^ @x!@ — trailing rest-capture (§11.1):
                                 --   binds @x@ to a sub-tuple of the
                                 --   matched tuple's remaining elements.
@@ -75,8 +82,9 @@ data Expr
   | EAtom Name
   | EInt Integer
   | EDouble Double
-  | EStr String
-  | ETuple [Expr]
+  | ETuple [Expr]               -- ^ string literals desugar (§9): an
+                                --   expression @"hi"@ arrives here as the
+                                --   codepoint cons-list @(104, (105, Nil))@.
   | ESplice Expr                -- ^ @e!@ — construction-side splice (§4).
   | ECall Name [Expr]           -- ^ builtin call, e.g. @rand(n)@, @typeOf(x)@.
   | EBin Op Expr Expr
@@ -87,6 +95,12 @@ data Action
   = Out Expr                    -- ^ bare tuple emission (the default action).
   | Lob Name Expr               -- ^ @lob Bag (...)@ — cross-bag send (§6.1).
   | Say String [Expr]           -- ^ @say "fmt" args...@ — console side effect.
+                                --   The format literal stays a raw
+                                --   'String' on purpose: the say-position
+                                --   is not an expression — the action
+                                --   consumes the literal itself as a
+                                --   format, never a bag value (§9;
+                                --   provisional, flip-worthy).
   | Exit Expr
   | Die                         -- ^ @die@ \/ @quit@ — terminate this machine.
   | Sleep Expr                  -- ^ throttling back-off (§8); post-commit only.
@@ -130,7 +144,6 @@ renderPat (PVar n)    = n
 renderPat (PAtom n)   = n
 renderPat (PInt i)    = show i
 renderPat (PDouble d) = show d
-renderPat (PStr s)    = show s
 renderPat (PRest n)   = n ++ "!"
 renderPat (PTuple ps) = "(" ++ intercalate ", " (map renderPat ps) ++ ")"
 
@@ -160,7 +173,6 @@ renderExpr (EVar n)     = n
 renderExpr (EAtom n)    = n
 renderExpr (EInt i)     = show i
 renderExpr (EDouble d)  = show d
-renderExpr (EStr s)     = show s
 -- A one-element tuple needs a trailing comma to survive the round trip
 -- (bare @(x)@ reparses as parenthesised grouping in expression position).
 renderExpr (ETuple [e]) = "(" ++ renderElem e ++ ",)"

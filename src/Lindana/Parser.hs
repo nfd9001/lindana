@@ -16,8 +16,15 @@
 -- List/cons sugar (§11.5, provisionally resolved) is desugared at
 -- parse time: @[a, b, c]@ is nested 2-tuples ending in the @Nil@ atom,
 -- @[h | t]@ conses onto an arbitrary tail expression/pattern, @[]@ is
--- @Nil@. Purely syntactic — the AST has no list nodes, so the
--- pretty-printer renders the desugared tuple form (which round-trips).
+-- @Nil@. Casual-string sugar (§9, provisionally resolved) likewise:
+-- @\"...\"@ in expression or pattern position desugars to a cons-list
+-- of codepoint ints — the same shape the list literal builds; plain
+-- Ints all the way down, no Char type (§11.4, provisionally resolved).
+-- Both are purely syntactic — the AST has no list or string nodes, so
+-- the pretty-printer renders the desugared tuple form (which
+-- round-trips). The one string literal that survives as a raw
+-- 'String' is @say@'s format: that position is not an expression, the
+-- action consumes the literal as a format.
 module Lindana.Parser
   ( parseProgram
   , PError
@@ -26,7 +33,7 @@ module Lindana.Parser
 import Control.Monad (void, when)
 import qualified Control.Monad.State.Strict as St
 import Control.Monad.Trans.Class (lift)
-import Data.Char (digitToInt)
+import Data.Char (digitToInt, ord)
 import Data.List (foldl')
 import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
@@ -142,6 +149,9 @@ doubleLit = lexeme . try $ do
   fp <- some digitChar
   pure (read (ip ++ '.' : fp) :: Double)
 
+-- | A string literal, escapes resolved. In expression or pattern
+-- position this is immediately desugared to codepoints (§9 sugar,
+-- see 'strExpr'/'strPat'); the one raw consumer is @say@'s format.
 stringLit :: Parser String
 stringLit = lexeme $ do
   _ <- char '"'
@@ -194,8 +204,17 @@ patternP = choice
   , PVar    <$> varIdent
   , PDouble <$> doubleLit
   , PInt    <$> intLit
-  , PStr    <$> stringLit
+  , strPat
   ]
+
+-- | Casual-string pattern sugar (§9, provisional): @\"add\"@
+-- desugars to the codepoint cons-list pattern @(97, (100, (100, Nil)))@ —
+-- the same shape the §11.5 list pattern builds, so structural matching
+-- needs no new cases. Plain Ints all the way down (§11.4, provisionally
+-- resolved): no Char, no PStr node.
+strPat :: Parser Pat
+strPat = (foldr (\c p -> PTuple [PInt (toInteger (ord c)), p]) (PAtom "Nil"))
+           <$> stringLit
 
 -- | List/cons pattern sugar (§11.5, provisional): @[p1, p2 | t]@
 -- desugars to @(p1, (p2, t))@, @[]@ to the @Nil@ atom. Elements are
@@ -276,13 +295,22 @@ primP = choice
   [ callP
   , parenExpr
   , listExpr
-  , EStr    <$> stringLit
+  , strExpr
   , EDouble <$> doubleLit
   , EInt    <$> intLit
   , EAtom   <$> atomIdent
   , EVar    <$> varIdent
   , ENeg    <$> (symbolT "-" *> primP)
   ]
+
+-- | Casual-string literal sugar (§9, provisional): @\"hi\"@ desugars
+-- to @(104, (105, Nil))@ — a cons-list of codepoint ints, the same
+-- shape the §11.5 list literal builds (@[104, 105]@ IS @\"hi\"@).
+-- Plain Ints all the way down (§11.4, provisionally resolved); no
+-- EStr node, so the renderer emits the desugared form.
+strExpr :: Parser Expr
+strExpr = (foldr (\c e -> ETuple [EInt (toInteger (ord c)), e]) (EAtom "Nil"))
+            <$> stringLit
 
 -- | Builtin function application: @rand(n)@, @typeOf(x)@, @atomize s@,
 -- @atos a@.
