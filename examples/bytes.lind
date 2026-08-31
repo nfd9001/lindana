@@ -4,7 +4,9 @@
 -- (Bytes, H) completion tuple into Global — the gate consumers join
 -- on, since binds are deferred effects (§7.2). say %b decodes a
 -- handle; == stays pure atom identity, so content comparison is the
--- bytesEqual verb's job (§9).
+-- bytesEqual verb's job (§9). bytesRead(H) is the decode-back path
+-- (§9, issue #12): the same codepoints come out that went in, so a
+-- string in and out of ByteString is the identity.
 
 : [bytesBind Greeting [72, 105]; (Go,)]
 
@@ -16,4 +18,14 @@
 (Bytes, Salute), (Check,), (Go2,) :
   [ if bytesEqual(Greeting, Salute) then say "contents equal" else say "contents differ"
   ; if Greeting == Salute then say "same atom?!" else say "distinct atoms"
+  ; (Read,)
   ; exit 0 ]
+
+-- the identity invariant (§9, issue #12): bytesRead decodes the
+-- handle's bytes back into the codepoint list the bind consumed —
+-- here it matches the string literal pattern "Hi" structurally, and
+-- %s decodes it like any casual string (the Greeting bind has already
+-- landed — the "%b" say above decoded it — so (Read,) is a sound gate)
+(Read,) : (RoundTrip, bytesRead(Greeting))
+(RoundTrip, "Hi") : [say "round trip: %s" bytesRead(Greeting); (Fin,)]
+(Fin,) : exit 0

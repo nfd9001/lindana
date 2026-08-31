@@ -208,6 +208,12 @@ main = hspec $ do
       it "parses bytesEqual as a builtin call in condition position" $ do
         p <- parseOk "(H,) : if bytesEqual(H, Greeting) then die else die"
         progDecls p `shouldHaveLength` 1
+      it "parses bytesRead in expression position (§9, issue #12)" $ do
+        p <- parseOk "(H,) : (Out, bytesRead(H))"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PAtom "H"])]
+                   [Out (ETuple [EAtom "Out", ECall "bytesRead" [EAtom "H"]])]]
+        roundTrips "(H,) : (Out, bytesRead(H))" `shouldBe` True
       it "round-trips the bytestring verbs" $
         roundTrips ": bytesBind Greeting [72, 105]\n(H,) : [bytesDestroy H; if bytesEqual(H, H) then die else die]"
           `shouldBe` True

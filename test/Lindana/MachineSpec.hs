@@ -437,6 +437,37 @@ spec = do
       output <- readIORef said
       output `shouldBe` []
 
+  describe "bytesRead — the decode-back path (§9, issue #12)" $ do
+    it "decodes the handle's bytes back into the codepoint cons-list" $ do
+      -- Gate on the (Bytes, H) completion tuple: the bind is a
+      -- deferred effect, so the read must come after it lands (§9).
+      let m = machine (take1 (PTuple [a "Bytes", a "G"]))
+            [ Out (ECall "bytesRead" [EAtom "G"]), Die ]
+          b = machine [] [ BytesBind "G" (consL [int 72, int 105, int 9786]), Die ]
+      r <- runProgram [m, b] []
+      rrBag r `shouldBe` [stringVal "Hi\9786"]
+    it "is the identity: bytesRead of a bind returns the same list, shape included" $ do
+      -- The issue's invariant: "running a string in and out of
+      -- ByteString is like passing it through the identity function."
+      -- The read-back Val must equal the original list — not merely
+      -- render the same — so structural matching against a string
+      -- literal pattern just works.
+      let cps = consL [int 79, int 107]
+          m = machine (take1 (PTuple [a "Bytes", a "W"]))
+            [ Out (ECall "bytesRead" [EAtom "W"]), Die ]
+          b = machine [] [ BytesBind "W" cps, Die ]
+      r <- runProgram [m, b] []
+      rrBag r `shouldBe` [stringVal "Ok"]
+      rrBag r `shouldBe` [VTuple [VInt 79, VTuple [VInt 107, VAtom "Nil"]]]
+    it "on an unbound handle aborts the machine's transaction" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (p1 "Go"))
+            [ Out (ECall "bytesRead" [EAtom "Nope"]), Die ]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
+      rrBag r `shouldBe` [VTuple [VAtom "Go"]]
+      output <- readIORef said
+      output `shouldBe` []
+
     it "== between atom literals is identity even without bytes bound" $ do
       let m = machine (take1 (p1 "Go"))
             [ If (EBin Eq (EAtom "A") (EAtom "A"))
