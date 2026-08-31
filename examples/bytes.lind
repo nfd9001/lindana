@@ -1,0 +1,19 @@
+-- §9 bytestrings: real string work goes through opaque Atom handles
+-- over a runtime side-table. bytesBind registers the UTF-8 encoding of
+-- a codepoint list under a (compile-time-chosen) atom and emits a
+-- (Bytes, H) completion tuple into Global — the gate consumers join
+-- on, since binds are deferred effects (§7.2). say %b decodes a
+-- handle; == stays pure atom identity, so content comparison is the
+-- bytesEqual verb's job (§9).
+
+: [bytesBind Greeting [72, 105]; (Go,)]
+
+(Bytes, Greeting), (Go,) : [say "greeting: %b" Greeting; (Check,)]
+
+-- identical bytes under a different handle: bytesEqual compares
+-- contents, == compares handles — the two verdicts disagree (§9)
+: [bytesBind Salute [72, 105]; (Go2,)]
+(Bytes, Salute), (Check,), (Go2,) :
+  [ if bytesEqual(Greeting, Salute) then say "contents equal" else say "contents differ"
+  ; if Greeting == Salute then say "same atom?!" else say "distinct atoms"
+  ; exit 0 ]

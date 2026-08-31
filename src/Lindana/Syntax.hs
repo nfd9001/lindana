@@ -92,6 +92,14 @@ data Action
   | Sleep Expr                  -- ^ throttling back-off (§8); post-commit only.
   | Panic Expr                  -- ^ @panic e@ — fatal (§6.4).
   | Raise Expr                  -- ^ @error (...)@ — fire context into Error bag.
+  | BytesBind Name Expr         -- ^ @bytesBind H [72, 105]@ (§9) — build a
+                                --   UTF-8 bytestring from the codepoint list
+                                --   and register it under the (compile-time-
+                                --   chosen) atom handle. The runner emits a
+                                --   @(Bytes, H)@ completion tuple into @Global@
+                                --   once the side-table write lands.
+  | BytesDestroy Expr           -- ^ @bytesDestroy e@ (§9) — drop the handle's
+                                --   side-table entry (manual lifetime).
   | If Expr [Action] [Action]   -- ^ Terse @if@; branches are action sequences.
   deriving (Eq, Show)
 
@@ -141,6 +149,8 @@ renderAction Die          = "die"
 renderAction (Sleep e)    = "sleep " ++ renderExpr e
 renderAction (Panic e)    = "panic " ++ renderExpr e
 renderAction (Raise e)    = "error " ++ renderExpr e
+renderAction (BytesBind h e) = "bytesBind " ++ h ++ " " ++ renderExpr e
+renderAction (BytesDestroy e) = "bytesDestroy " ++ renderExpr e
 renderAction (If c t e)   =
   "if " ++ renderExpr c ++ " then " ++ renderActionSeq t
   ++ " else " ++ renderActionSeq e

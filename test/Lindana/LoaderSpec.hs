@@ -213,7 +213,38 @@ spec = do
       r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
       rrExit r `shouldBe` ExitSuccess
 
+  describe "bytestring e2e (§9)" $ do
+    it "static bind via no-LHS one-shot: (Bytes, H) gates, %b says the bytes" $ do
+      l <- loadOk $ unlines
+        [ ": [bytesBind Greeting [72, 105]; (Go,)]"
+        , "(Bytes, Greeting), (Go,) : [say \"greeting: %b\" Greeting; (Done,)]"
+        , "(Done,) : exit 0"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["greeting: Hi"]
+      rrExit rr `shouldBe` ExitSuccess
+
+    it "handles are opaque: same bytes, distinct atoms (§9)" $ do
+      l <- loadOk $ unlines
+        [ ": [bytesBind A [72]; bytesBind B [72, 72]; (Go,)]"
+        , "(Bytes, A), (Bytes, B), (Go,) :"
+        , "  [ if bytesEqual(A, B) then (ContentEq,) else (ContentNeq,)"
+        , "  ; if A == B then (SameAtom,) else (DifferentAtoms,)"
+        , "  ; exit 0 ]"
+        ]
+      r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
+      sort (map renderVal (rrBag r)) `shouldBe`
+        ["(ContentNeq)", "(DifferentAtoms)"]
+      rrExit r `shouldBe` ExitSuccess
+
 -- | Run loaded, capturing @say@ output and the result.
+--
+-- House rule, learned the hard way in the §9 e2e tests: a program
+-- whose machines all die leaves the §6.4 default @Error@ machine
+-- blocked forever, and termination then depends on the RTS's
+-- @BlockedIndefinitelyOnSTM@ deadlock report — which is not reliable
+-- under the test harness (flaky hangs). End e2e programs with an
+-- explicit @exit@, not just @die@.
 runCaptureSay :: [MachineDef] -> Map Name [Expr]
               -> IO ([String], RunResult)
 runCaptureSay ms initial = do

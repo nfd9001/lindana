@@ -66,6 +66,7 @@ reservedWords = Set.fromList
   , "say", "exit", "die", "quit", "sleep"
   , "lob", "error", "panic"
   , "rand", "typeOf", "atomize", "atos"
+  , "bytesBind", "bytesDestroy", "bytesEqual"
   ]
 
 -- | Whitespace consumer. At depth 0: spaces, tabs, CRs and @--@ line
@@ -288,7 +289,7 @@ primP = choice
 callP :: Parser Expr
 callP = choice
   [ rword (T.pack n) *> (ECall n <$> grouped '(' ')' (exprP `sepBy` symbolT ","))
-  | n <- ["rand", "typeOf", "atomize", "atos"] :: [String]
+  | n <- ["rand", "typeOf", "atomize", "atos", "bytesEqual"] :: [String]
   ]
 
 -- | Parenthesised expression: with no comma it is grouping, with a
@@ -354,6 +355,8 @@ actionP :: Parser Action
 actionP = choice
   [ ifP
   , lobP
+  , bytesBindP
+  , bytesDestroyP
   , sayP
   , exitP
   , sleepP
@@ -403,6 +406,17 @@ panicP = rword "panic" *> (Panic <$> exprP)
 
 errorP :: Parser Action
 errorP = rword "error" *> (Raise <$> tupleExpr)
+
+-- | §9 bytestring verbs. The handle of @bytesBind@ is a capitalized
+-- atom — compile-time-chosen, per the §6.4/§8 one-shot pattern for
+-- statics (the completion tuple @(Bytes, H)@ is what consumers join
+-- on). @bytesDestroy@ takes any expression (which must evaluate to an
+-- atom).
+bytesBindP :: Parser Action
+bytesBindP = rword "bytesBind" *> (BytesBind <$> atomIdent <*> exprP)
+
+bytesDestroyP :: Parser Action
+bytesDestroyP = rword "bytesDestroy" *> (BytesDestroy <$> exprP)
 
 --------------------------------------------------------------------------------
 -- Declarations & program
