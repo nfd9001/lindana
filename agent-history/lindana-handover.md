@@ -263,7 +263,7 @@ Note: this predates several later decisions (e.g. atom quoting was inconsistent 
 
 Roughly in order of how foundational they are:
 
-1. **Pattern-side `!` rest-capture** — wanted, exact syntax not written (§4).
+1. **Pattern-side `!` rest-capture** — **provisionally resolved** (§13.4, branch `runtime/machine-loop-actions`): trailing-only, var-only (`var!` as the last element of a tuple pattern; parser enforces), zero-or-more elements so `(c!)` matches any tuple — the shape the §6.4 default `Error` machine needs. Mid and trailing capture resolved as **mutually exclusive without language extensions**: under the natural "find an assignment" reading, a mid capture leaves the alignment of intervening fixed elements indeterminate (where does `c` sit in `(a, b!, c, d!)?`). A deterministic greedy-left/backtracking multi-slice strategy was considered and deliberately deferred — "a funny option with good footguns" — recorded in `agent-history/messageboard/multi-slice-rest-capture-future.txt`. Implementation: `PRest Name` in Syntax, `matchTuple` in Runtime, tests in RuntimeSpec/Spec/MachineSpec.
 2. **Repeated variables within one pattern** — does `(a, a)` require equality between the two positions (Prolog-style), or is it a rebind/shadow? Raised, never resolved.
 3. **Mixed int/double arithmetic** — auto-promote, or a type error via `error`? (§9)
 4. **Char type vs. plain Ints** for string sugar — posed, not confirmed either way (§9).
