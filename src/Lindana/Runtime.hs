@@ -130,6 +130,14 @@ data MatchResult = MatchResult
 -- second occurrence must bind to an /equal/ value, else the match
 -- fails. Note the equality used is 'Val' equality, i.e. the same
 -- @==@ the language gives users; nothing deeper, per §3.3.
+--
+-- Rest capture (§11.1, provisionally resolved): a trailing @PRest n@
+-- inside a tuple pattern binds @n@ to a sub-tuple of the remaining
+-- elements — zero or more, so capture patterns match any tuple arity
+-- ≥ the pattern's prefix. A capture against a non-tuple value does
+-- not match (the matcher stays structural; @panic c@ on the default
+-- Error machine will see only tuples, which is all the Error bag
+-- accumulates).
 matchPat :: Pat -> Val -> Env -> Maybe Env
 matchPat (PVar n) v env = case Map.lookup n env of
   Just v' | v' == v   -> Just env
@@ -139,11 +147,22 @@ matchPat (PAtom a) (VAtom b) env | a == b = Just env
 matchPat (PInt i) (VInt j) env | i == j = Just env
 matchPat (PDouble x) (VDouble y) env | x == y = Just env
 matchPat (PStr s) (VStr t) env | s == t = Just env
-matchPat (PTuple ps) (VTuple vs) env
-  | length ps == length vs = foldl step (Just env) (zip ps vs)
-  where
-    step me (p, v) = me >>= \e -> matchPat p v e
+matchPat (PTuple ps) (VTuple vs) env = matchTuple ps vs env
+-- A rest capture binds-or-checks exactly like a variable, except the
+-- value is always the sub-tuple of remaining elements — so a name
+-- repeated across a capture and a plain element honours the §11.2
+-- equality rule instead of overwriting.
+matchPat (PRest n) (VTuple vs) env = matchPat (PVar n) (VTuple vs) env
 matchPat _ _ _ = Nothing
+
+-- | Tuple-pattern matching, with the §11.1 trailing rest capture. The
+-- parser guarantees at most one 'PRest', in last position; the
+-- catch-all equations still reject anything else defensively.
+matchTuple :: [Pat] -> [Val] -> Env -> Maybe Env
+matchTuple [PRest n] vs env = matchPat (PRest n) (VTuple vs) env
+matchTuple (p : ps) (v : vs) env = matchPat p v env >>= matchTuple ps vs
+matchTuple [] [] env = Just env
+matchTuple _ _ _ = Nothing
 
 -- | Match a join pattern (§3.4) against the bag, atomically.
 --

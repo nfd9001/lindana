@@ -3,9 +3,8 @@
 -- the rendered output yields an equal AST).
 --
 -- This is a shell: syntax is illustrative pending the real grammar pass
--- (see lindana-handover.md §4). Not modelled yet: pattern-side @!@
--- rest-capture, list/cons sugar, Terse->Restricted desugaring, effect
--- bundles.
+-- (see lindana-handover.md §4). Not modelled yet: list/cons sugar,
+-- Terse->Restricted desugaring, effect bundles.
 module Lindana.Syntax
   ( -- * AST
     Name
@@ -58,6 +57,11 @@ data Pat
   | PDouble Double
   | PStr String
   | PTuple [Pat]                -- ^ @()@, @(Tick,)@, @("add", a, b, c)@
+  | PRest Name                  -- ^ @x!@ — trailing rest-capture (§11.1):
+                                --   binds @x@ to a sub-tuple of the
+                                --   matched tuple's remaining elements.
+                                --   Trailing-only, var-only (parser
+                                --   enforces); zero-or-more elements.
   deriving (Eq, Show)
 
 data Op = Add | Sub | Mul | Div | Eq | Neq
@@ -116,6 +120,7 @@ renderPat (PAtom n)   = n
 renderPat (PInt i)    = show i
 renderPat (PDouble d) = show d
 renderPat (PStr s)    = show s
+renderPat (PRest n)   = n ++ "!"
 renderPat (PTuple ps) = "(" ++ intercalate ", " (map renderPat ps) ++ ")"
 
 -- | A single action renders bare; multiple render as a bracketed Terse

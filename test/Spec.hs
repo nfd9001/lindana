@@ -4,6 +4,9 @@ module Main (main) where
 
 import qualified Data.Text as T
 
+import Control.Monad (void)
+import Data.Either (isLeft)
+
 import Test.Hspec
 
 import Lindana.Parser (parseProgram)
@@ -72,6 +75,18 @@ main = hspec $ do
 
     it "round-trips the toy example through the pretty-printer" $
       roundTrips toySrc `shouldBe` True
+
+    it "parses trailing rest-capture and round-trips it (§11.1)" $ do
+      p <- parseOk "(c!) : die"
+      progDecls p `shouldHaveLength` 1
+      roundTrips "(c!) : die" `shouldBe` True
+      void (parseOk "(Ping, rest!) : (Pong, rest!)")
+
+    it "rejects mid rest-capture (trailing-only, §11.1)" $
+      parseProgram "(a, b!, c) : die" `shouldSatisfy` isLeft
+
+    it "rejects rest-capture on a non-variable (§11.1: var-only)" $
+      parseProgram "(Foo!) : die" `shouldSatisfy` isLeft
   spec
   RuntimeSpec.spec
   where

@@ -65,6 +65,15 @@ captureHooks = do
 spec :: Spec
 spec = do
   describe "the machine loop (§1)" $ do
+    it "capture + splice round-trip through the full loop (§11.1)" $ do
+      -- (Ping, 1, 2) → machine (Ping, rest!) : out (Pong, rest!) →
+      -- (Pong, 1, 2): the construction splice is the inverse of the
+      -- pattern capture — the continuation-passing core, end to end.
+      let m = machine (take1 (PTuple [a "Ping", PRest "rest"]))
+            [ Out (t [EAtom "Pong", ESplice (EVar "rest")]), Die ]
+      r <- runProgram [m] [t [EAtom "Ping", int 1, int 2]]
+      rrBag r `shouldBe` [VTuple [VAtom "Pong", VInt 1, VInt 2]]
+
     it "reacts to a matching tuple (the §10 toy program, current syntax)" $ do
       let add = machine (take1 (PTuple [a "Add", v "a", v "b", v "c"]))
             [ Out (ETuple [ESplice (EVar "c"), EBin Add (EVar "a") (EVar "b")])
