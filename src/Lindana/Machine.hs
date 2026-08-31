@@ -28,6 +28,14 @@
 --     'rtsBytes' and emits the @(Bytes, H)@ completion tuple into
 --     @Global@; a destroy just drops the entry.
 --
+-- §11.6 (effect-bundle grammar) is provisionally resolved here as a
+-- decision note rather than syntax: the bundle /is/ a machine
+-- reaction's post-commit action list — the 'Effect' list this
+-- interpreter returns and the runner drains. There is no concrete
+-- syntax to write, and none is wanted: bundles are a runtime concept,
+-- not a user construct (the user already writes the action list; the
+-- transaction/deferred split is the implementation of §7.2/§8.2).
+--
 -- Provisional decisions made here (flip-worthy, per the house style):
 --
 --   * @exit@ terminates the /whole program/ with the evaluated code
@@ -90,7 +98,7 @@ import Control.Concurrent.STM
 import Control.Exception (finally)
 import Control.Monad (unless, when)
 import Data.ByteString (ByteString)
-import Data.Char (chr)
+import Data.Char (chr, ord)
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
@@ -259,12 +267,16 @@ evalR rts env = evalExprG (rtsBuiltin rts) env
 -- and 'uniformR' is pure, so the step is an ordinary STM read/write.
 --
 -- Malformed calls (unknown builtin, wrong arity/kind) are provisional
--- Haskell-level errors — unified @error@-verb routing pending the
--- effect-grammar pass (§7.3). @atomize@ of an uncapitalized string is
--- specified (§4) as fatal @panic@; expression position can't queue an
--- effect, so provisionally it is a Haskell error that kills the
--- machine thread (the 'finally' in 'machineThread' keeps the live
--- count honest).
+-- Haskell-level errors — unified @error@-verb routing still pending
+-- (§7.3). @atomize@ of an uncapitalized string is specified (§4) as
+-- fatal @panic@; expression position can't queue an effect, so
+-- provisionally it is a Haskell error that kills the machine thread
+-- (the 'finally' in 'machineThread' keeps the live count honest).
+--
+-- With casual-string sugar (§9), @atomize@ consumes a codepoint
+-- cons-list and decodes it ('casualString') before the capitalization
+-- check; @atos@ hands back a casual string ('stringVal') — there is
+-- no Str type (§11.4).
 rtsBuiltin :: RTS -> Name -> [Val] -> STM Val
 rtsBuiltin rts name args = case (name, args) of
   ("rand", [VInt n])
@@ -275,10 +287,11 @@ rtsBuiltin rts name args = case (name, args) of
         writeTVar (rtsSeed rts) g'
         pure (VInt (toInteger v))
   ("typeOf", [v])     -> pure (VAtom (typeTag v))
-  ("atomize", [VStr s])
+  ("atomize", [v])
     | capitalized s   -> pure (VAtom s)
     | otherwise       -> error "atomize: string must be capitalized (§4: panic)"
-  ("atos", [VAtom n]) -> pure (VStr n)
+    where s = casualString v
+  ("atos", [VAtom n]) -> pure (stringVal n)
   -- §9: content comparison is a verb's job, reaching into the
   -- side-table; @==@ never does (it stays pure atom identity).
   ("bytesEqual", [VAtom x, VAtom y]) -> do
@@ -296,8 +309,9 @@ typeTag :: Val -> Name
 typeTag VAtom{}   = "Atom"
 typeTag VInt{}    = "Int"
 typeTag VDouble{} = "Double"
-typeTag VStr{}    = "Str"
 typeTag VTuple{}  = "Tuple"
+-- No Str tag (§9): a casual string is a cons-list — its shape is
+-- Tuple, and interpretation is up to the consuming action.
 
 -- | Interpret an action list in the matching transaction. Tuple-space
 -- verbs execute immediately (they are the transaction); irrevocable
@@ -364,21 +378,13 @@ interpretActions rts bag env = go []
       _ -> error "sleep: non-numeric operand (action-layer check, §3.3)"
 
 -- | §9: a byte/int list is a cons-list of @VInt@ codepoints ending in
--- the @Nil@ atom — exactly what the §11.5 list literal builds. Shape
--- and range are the action layer's check (§3.3), same as @sleep@.
+-- the @Nil@ atom — exactly what the §11.5 list literal (or now a
+-- @\"...\"@ string literal, §9) builds. Shape and range are the
+-- action layer's check (§3.3), same as @sleep@; the decoding itself is
+-- shared with the other string-consuming actions via Runtime's
+-- 'casualString'.
 codepoints :: Val -> [Int]
-codepoints (VInt n) = [cp n]
-codepoints (VTuple [VInt n, rest]) = cp n : codepoints rest
-codepoints (VTuple _) =
-  error "bytesBind: list elements must be codepoint ints (§9)"
-codepoints (VAtom "Nil") = []
-codepoints _ = error "bytesBind: expected a list of codepoint ints (§9)"
-
--- | Top level, not a @where@: GHC 9.0 only scopes a @where@ over the
--- equations it follows (same deal as 'intOp' in Runtime).
-cp :: Integer -> Int
-cp n | 0 <= n && n <= 0x10FFFF = fromInteger n
-     | otherwise               = error "bytesBind: codepoint out of range (0..0x10FFFF)"
+codepoints = map ord . casualString
 
 -- | @error e@ (§6.4): an @(Error, …)@ tuple into the named @Error@
 -- bag (conceptually sugar over @lob Error …@); a tuple argument's
@@ -503,15 +509,15 @@ runBundle rts = go
 setExit :: RTS -> ExitCode -> STM ()
 setExit rts c = writeTVar (rtsExit rts) (Just c)
 
--- | @say@ formatting: @%i@ int, @%s@ string, @%a@ render-any, @%b@
--- bytestring handle (decoded, §9), @%%@ a literal @%@. Mismatched arg
--- counts are provisional Haskell errors
--- (pending unified @error@ routing, §3.3).
+-- | @say@ formatting: @%i@ int, @%s@ casual string (a codepoint
+-- cons-list, decoded — §9), @%a@ render-any, @%b@ bytestring handle
+-- (decoded, §9), @%%@ a literal @%@. Mismatched arg counts are
+-- provisional Haskell errors (pending unified @error@ routing, §3.3).
 formatSay :: Map Name ByteString -> String -> [Val] -> String
 formatSay bytes fmt = go fmt
   where
     go ('%' : 'i' : cs) (VInt n : as)   = show n ++ go cs as
-    go ('%' : 's' : cs) (VStr s : as)   = s ++ go cs as
+    go ('%' : 's' : cs) (v : as)        = casualString v ++ go cs as
     go ('%' : 'a' : cs) (v : as)        = renderVal v ++ go cs as
     go ('%' : 'b' : cs) (VAtom h : as) =
       case Map.lookup h bytes of
@@ -532,7 +538,6 @@ renderVal :: Val -> String
 renderVal (VAtom n)   = n
 renderVal (VInt n)    = show n
 renderVal (VDouble d) = show d
-renderVal (VStr s)    = show s
 renderVal (VTuple vs) = "(" ++ intercalate ", " (map renderVal vs) ++ ")"
 
 exitCodeOf :: Val -> ExitCode

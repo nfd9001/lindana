@@ -20,7 +20,7 @@ import System.Timeout (timeout)
 import Test.Hspec
 
 import Lindana.Machine
-import Lindana.Runtime (Val (..))
+import Lindana.Runtime (Val (..), stringVal)
 import Lindana.Syntax
 
 --------------------------------------------------------------------------------
@@ -176,9 +176,18 @@ spec = do
       let m = machine (take1 (PTuple [a "Go", v "n", v "s"]))
             [ Say "n is %i, s is %s" [EVar "n", EVar "s"], Die ]
       _ <- runGlobal hooks [m]
-             [t [EAtom "Go", int 42, EStr "hi"]]
+             [t [EAtom "Go", int 42, consL [int 104, int 105]]]
       output <- readIORef said
       reverse output `shouldBe` ["n is 42, s is hi"]
+
+    it "say %s decodes a casual string, escapes and non-ASCII included (§9)" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (PTuple [a "Go", v "s"]))
+            [ Say "<%s>" [EVar "s"], Die ]
+      _ <- runGlobal hooks [m]
+             [t [EAtom "Go", consL [int 72, int 105, int 10, int 9786]]]
+      output <- readIORef said
+      reverse output `shouldBe` ["<Hi\n\9786>"]
 
   describe "termination verbs" $ do
     it "exit terminates the program with the given code" $ do
@@ -280,11 +289,14 @@ spec = do
                      , ECall "typeOf" [EDouble 1.5]
                      , ECall "typeOf" [EAtom "Foo"]
                      , ECall "typeOf" [t []]
+                     , -- A casual string is a cons-list: its shape is
+                       -- Tuple — there is no Str tag (§9, §11.4).
+                       ECall "typeOf" [consL [int 65]]
                      ])
             , Die ]
       r <- runProgram [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple
-        [VAtom "Int", VAtom "Double", VAtom "Atom", VAtom "Tuple"]]
+        [VAtom "Int", VAtom "Double", VAtom "Atom", VAtom "Tuple", VAtom "Tuple"]]
 
     it "rand stays in range and is deterministic across runs (fixed seed)" $ do
       let roller = machine (take1 (p1 "Roll"))
@@ -314,13 +326,28 @@ spec = do
       length coins `shouldBe` 4
       coins `shouldSatisfy` (\cs' -> or (zipWith (==) cs' (drop 2 cs')))
 
-    it "atomize/atos round-trip (§4)" $ do
+    it "atomize/atos round-trip (§4), over casual strings (§9)" $ do
       let m = machine (take1 (p1 "Go"))
-            [ Out (t [ ECall "atos" [ECall "atomize" [EStr "Foo"]]
-                     , ECall "typeOf" [ECall "atomize" [EStr "Foo"]] ])
+            [ Out (t [ ECall "atos" [ECall "atomize" [consL [int 70, int 111, int 111]]]
+                     , ECall "typeOf" [ECall "atomize" [consL [int 70, int 111, int 111]]] ])
             , Die ]
       r <- runProgram [m] [t [EAtom "Go"]]
-      rrBag r `shouldBe` [VTuple [VStr "Foo", VAtom "Atom"]]
+      -- atos hands back a casual string: the codepoint cons-list the
+      -- §9 literal sugar builds — no VStr, no special type.
+      rrBag r `shouldBe` [VTuple [stringVal "Foo", VAtom "Atom"]]
+
+    it "atomize of an uncapitalized string aborts the machine's transaction (§4)" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (p1 "Go"))
+            [ Out (t [EAtom "Seen"])
+            , Out (t [ECall "atomize" [consL [int 108, int 97, int 116, int 101]]]) ]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
+      -- The interpret-time §4 panic (provisionally a Haskell error)
+      -- kills the transaction: the Out never commits, the tuple stays
+      -- in the bag, no effects leak.
+      rrBag r `shouldBe` [VTuple [VAtom "Go"]]
+      output <- readIORef said
+      output `shouldBe` []
 
   describe "lob accumulation (§6.2 preview)" $ do
     it "lob to an unknown bag creates a machineless accumulator" $ do

@@ -19,7 +19,7 @@ import Test.Hspec
 import Lindana.Loader
 import Lindana.Machine
 import Lindana.Parser (parseProgram)
-import Lindana.Runtime (Val (..))
+import Lindana.Runtime (Val (..), stringVal)
 import Lindana.Syntax
 
 -- | Parse and load, failing the test on parse or load errors.
@@ -159,7 +159,7 @@ spec = do
       r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
       rrExit r `shouldBe` ExitSuccess
       Map.lookup "Error" (rrBags r) `shouldBe`
-        Just [VTuple [VAtom "Error", VStr "bad", VInt 7]]
+        Just [VTuple [VAtom "Error", stringVal "bad", VInt 7]]
 
     it "a user Error machine replaces the default end-to-end" $ do
       l <- loadOk $ unlines
@@ -212,6 +212,16 @@ spec = do
         ]
       r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
       rrExit r `shouldBe` ExitSuccess
+
+  describe "casual-string e2e (§9)" $ do
+    it "a literal tag matches its literal: patterns and values desugar alike" $ do
+      l <- loadOk $ unlines
+        [ "{ (\"greet\", \"world\") }"
+        , "(\"greet\", who) : [say \"hello, %s\" who; exit 0]"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["hello, world"]
+      rrExit rr `shouldBe` ExitSuccess
 
   describe "bytestring e2e (§9)" $ do
     it "static bind via no-LHS one-shot: (Bytes, H) gates, %b says the bytes" $ do

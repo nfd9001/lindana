@@ -49,10 +49,11 @@ Git history might be a better source-of-truth about recent progress until I've e
 - `examples/` — sample `.lind` files. `hello.lind` is the issue #7
   no-LHS one-shot Hello World; `bags.lind` exercises named
   bags end-to-end; `lists.lind` (§11.5) sums a list via cons-pattern
-  sugar; `bytes.lind` (§9) binds bytestring handles and contrasts
-  `bytesEqual` with `==`; `throttle.lind` (§8.2) is a deliberately
-  non-terminating long-runner — the CLI reports it as a deadlock when
-  every machine ends up blocked.
+  sugar; `strings.lind` (§9) shows casual-string literals matching
+  and decoding; `bytes.lind` (§9) binds bytestring handles and
+  contrasts `bytesEqual` with `==`; `throttle.lind` (§8.2) is a
+  deliberately non-terminating long-runner — the CLI reports it as a
+  deadlock when every machine ends up blocked.
 
 ## Building
 
@@ -83,7 +84,11 @@ Implemented: machines (including no-LHS one-shot machines, §1: `:` at
 the start of a line), join patterns with `rd`/`in`, tuples with `!`
 splice, list/cons sugar (§11.5, provisional: `[a, b, c]` literals and
 `[h | t]` patterns desugar at parse time to nested 2-tuples ending in
-the `Nil` atom — rendering shows the desugared form), Terse bracketed
+the `Nil` atom — rendering shows the desugared form), casual-string
+sugar (§9, provisional: `"..."` literals desugar at parse time to the
+same cons-list shape over codepoint `Int`s — plain Ints all the way
+down, no `Char`/`Str` type; `say %s` decodes, `atomize`/`atos`
+convert), Terse bracketed
 sequences `[a; b]`, `if/then/else`, verbs
 (`say` with `%b` for bytestring handles, `exit`, `die`/`quit`,
 `sleep`, `lob`, `error`, `panic`, `bytesBind`, `bytesDestroy`),
@@ -91,10 +96,13 @@ builtin calls (`rand`, `typeOf`, `atomize`, `atos`, `bytesEqual`),
 initial-bag blocks, named bag blocks, the §9 bytestring side-table
 (opaque atom handles; `==` is pure atom identity, `bytesEqual`
 compares contents; binds emit a `(Bytes, H)` completion tuple).
+Effect bundles need no syntax (§11.6, provisionally resolved): a
+reaction's post-commit action list *is* the bundle.
 
-Not yet (handover §11): string sugar beyond literals,
-effect bundles. Provisional (flip
+Not yet (handover §11): mixed int/double arithmetic, effect-runner
+scope, unified error routing. Provisional (flip
 worthy): pattern-side rest capture is trailing-only (§11.1), the
-list/cons sugar desugaring (§11.5), the
+list/cons sugar desugaring (§11.5), the string-literal desugaring
+(§9), the
 §11.10 top-level grammar (see the loader's header), and the §6.4
 default-`Error`-machine installation rule.

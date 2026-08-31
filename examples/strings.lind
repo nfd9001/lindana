@@ -1,0 +1,17 @@
+-- §9 casual strings: a "..." literal is parse-time sugar for a
+-- cons-list of codepoint ints — the same shape the §11.5 list literal
+-- builds ([104, 105] IS "hi"). No Char, no Str runtime type (§11.4,
+-- provisionally resolved): plain Ints all the way down, and
+-- interpretation is up to whichever action consumes the value (§3.3).
+-- say %s decodes a codepoint list; atomize/atos convert to/from atoms
+-- (atomize fatally errors on an uncapitalized one, §4).
+
+{ ("greet", "world") }
+
+-- the literal in this pattern desugars exactly like the one in the
+-- initial tuple above, so they match structurally
+("greet", who) : [say "hello, %s" who; (Next,)]
+
+-- atos turns an atom into a casual string; %s consumes any codepoint
+-- list, escapes and non-ASCII included
+(Next,) : [say "%s\n%s" atos(Bye) "ciao ☺"; exit 0]
