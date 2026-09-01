@@ -495,3 +495,132 @@ input-free "Hello World!" and exits 0.
   §11.11, fresh-name generation, unified error routing — now with an
   extra data point, the effect-runner's silent death on `say` format
   errors).
+
+### 13.13 Done — module import (§9, §6, §4, §12), branch `runtime/modules` (issue #17, part 1)
+
+Takes the core of issue #17 — the `import` effect, suffix mangling,
+hide lists, the `Nil → ""` preregistration, and the "add machines
+during runtime" machinery — and leaves the Prelude/stdlib paragraph
+and the error-reroute effect open (see "Next"). New modules:
+`src/Lindana/Def.hs` (the lowered `MachineDef` + reserved bag names,
+moved out of Machine so Import can sit between Loader and Machine
+without a cycle) and `src/Lindana/Import.hs` (find/hide/mangle/lower
+a module). The RTS gains the import machinery.
+
+- **Syntax (provisional, flip-worthy)**: `import H S Hide` — an
+  action with three /expressions/: the module-name handle, the
+  namespace-suffix handle (both must evaluate to atoms naming
+  bytestring side-table entries — module names are runtime data,
+  per the issue's "a bytestring name to search"), and the hide list
+  (a cons-list of atoms, `[]` for none). `import` is reserved.
+  Renders `import H S Nil` and round-trips.
+- **Search (provisional)**: the effect reads the handles' contents
+  at effect time (a rebind between commit and run is honored) and
+  loads `<moddir>/<name>.lind`, where @<moddir>@ is the new
+  `Hooks` `hookModDir` (default `"."`; the CLI sets it to the main
+  file's directory — `takeDirectory path`). The search name is
+  /never/ suffixed — suffixed files don't exist; the suffix is
+  purely an atom namespace. This matches the issue's "empty allowed,
+  though… a bad idea": the empty suffix is spelled via the
+  preregistered `Nil → ""` handle, and it means no namespacing.
+- **Suffix mangling (`Lindana.Import.mangleProgram`)**: the module's
+  effective suffix — ambient (the enclosing module's `machSfx`) plus
+  the written one, so nesting propagates per the issue's "applies
+  recursively to every import the imported module uses" — is
+  appended (raw concatenation; the caller writes the separator) to
+  every atom mentioned in the module's source: bag block names, atom
+  patterns/expressions, `lob` targets, `bytesBind` handles. Two
+  exemptions, both recorded: **`Nil`** (the cons-list spine sentinel
+  of §11.5/§9 — mangling it would corrupt every string/list literal
+  in the module; hazard: a module using `Nil` as ordinary data keeps
+  it unsuffixed) and the **hide-list expression of a nested import**
+  (it names the /target/ module's pre-mangle API). String/say-format
+  literals are data, not atoms, and are not mangled — an
+  `atomize "Foo"` inside a module names plain `Foo` (documented
+  hazard). No other exemptions: `Error` mangles (the error verb
+  routes at runtime instead, below) and `Global` mangles — a module
+  therefore /cannot name the real front door/; it replies into
+  whatever bag its caller passes as data. That's §4's continuation
+  philosophy and §12's no-special-cases, but it is the biggest
+  flip-worthy call of the slice: the obvious alternative is
+  exempting `Global`.
+- **Hide lists (`hideBags`)**: machines declared in the named bags
+  are dropped before mangling (pre-mangle names — or the same with
+  the suffix appended, for module-imports-module). Only machines:
+  initial tuples still load, and `lob` can still create the bag as a
+  machineless accumulator (§6.2).
+- **Lowering**: `loadProgramWith errBag` (new, Loader) — the §6.4
+  default Error machine's bag becomes a parameter. A module's
+  default lands on its /mangled/ Error bag (`Error ++ suffix`),
+  matching where the runtime routes its `error` calls: `interpretActions`
+  now writes `(Error ++ sfx, …)` with the tag atom suffixed the same
+  way, so a module's own `Error { … }` handler block (mangled like
+  everything else) catches its own errors, and a module without one
+  gets the fatal default on its private bag. Top-level behavior is
+  byte-identical (`sfx == ""`).
+- **Dynamic machines (the "adding more machines during runtime"
+  bit)**: `import` interprets as a deferred effect plus a
+  **pending-import slot**: `rtsLive` is bumped in-transaction, and
+  the effect settles it (`+k` machines −1 on load, −1 on skip or
+  failure). Without the slot, the run-alive check (`live == 0`)
+  can fire while an import bundle is still queued — all startup
+  machines may have died since it was committed (regression-tested).
+  The effect outs the module's initial tuples, emits the
+  **`(Imported, H, suffix)` completion tuple into `Global`** (the
+  `(Bytes, H)` gate idiom; `H` is the handle as written in the
+  import action — two imports through one handle are
+  indistinguishable, documented hazard), spawns the module's machine
+  threads, and records them in `rtsExtra` for shutdown cancellation
+  alongside the startup threads.
+- **Singletons**: `rtsMods` registers `(name, effective suffix)`
+  pairs; a repeat import skips the load but still emits the
+  completion tuple (consumers gate on it regardless). This also
+  makes self- and mutual-import cycles terminate. Hazard: first
+  import wins — a later hide list on an already-loaded pair is
+  silent no-op.
+- **Runner-safe failure**: import failure (missing file, parse
+  error, load error, unknown handle, invalid UTF-8) is contained in
+  the import effect: panic hook + `ExitFailure 1`, pending slot
+  settled — the effect-runner thread does NOT die silently the way
+  it does on a `say` format error (§13.12's tale; another argument
+  for unified error routing, §3.3/§7.3).
+- **`lob` takes an expression (provisional AST change, flip-worthy)**:
+  `Lob Name Expr` → `Lob Expr Expr`. The target is usually an atom,
+  but a lowercase variable is now legal — the bag name travels as
+  data, which is what makes the module reply pattern possible at
+  all. Must evaluate to an atom (action-layer check, §3.3).
+- **`Nil → ""` preregistration**: `rtsBytes` starts with the entry;
+  it is not special — `bytesBind Nil …` clobbers it,
+  `bytesDestroy Nil` drops it (regression test updated: the entry
+  survives unrelated destroys).
+- **Deferred from the issue**: the error-reroute effect ("reroutes
+  `error` calls for all the machines tracking a specific bag", last
+  update wins — and the Accursed source/target-bucket variant) and
+  the whole Prelude/stdlib paragraph (default import, pragmas-out,
+  machines that preregister statics). Both need more design than
+  this slice could carry honestly; see the PR's "Next".
+- **Tests**: 16 new — Spec: import grammar (three expressions, the
+  `Nil`/`[]` spelling, reserved-word check, round-trip) + mangler
+  unit tests (atoms mangle; variables/strings/hide lists/`Nil` don't);
+  ModuleSpec: e2e over `test/modules/*.lind` fixtures — load + mangled
+  atoms meeting on both sides, one-shot-at-spawn witness, hide list,
+  singleton repeat import (two completions, one spawn), missing
+  module = runner-safe panic/exit 1, `Nil` preregistration, the
+  pending-import shutdown race, recursive suffix propagation via a
+  two-level module chain, and both mangled-error routings (module
+  handler / fatal default). 138 total green, randomized order, 8×
+  repeat stable. Zero `-Wall` warnings.
+- **Examples**: `examples/imports.lind` + `examples/greeter.lind` —
+  runtime load with suffix `_v2`, `(Imported, …)` gating, the
+  reply-bag-as-data pattern; verified via CLI and `--parse`
+  round-trip (both files fixed points).
+- **Remaining threads (issue #17 part 2 + carried)**: the
+  error-reroute effect; Prelude/stdlib (default import, pragma-out,
+  static-preregistering machines); the issues this opens for #18
+  (file descriptors will want the same dynamic-spawn machinery and
+  probably a sister effect rerouting `say`'s target). Still open in
+  §11: mixed int/double arithmetic (§11.3), effect-runner scope
+  (§11.7), `die` vs `quit` (§11.9), bytestring reclamation (§11.11),
+  fresh-name generation (§9), unified error routing (§3.3/§7.3 —
+  import failure is now the strongest data point: it /can't/ afford
+  the runner's silent death).

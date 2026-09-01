@@ -8,6 +8,8 @@ library
     exposed-modules:  Lindana.Syntax
                       Lindana.Parser
                       Lindana.Runtime
+                      Lindana.Def
+                      Lindana.Import
                       Lindana.Machine
                       Lindana.Loader
     hs-source-dirs:   src
@@ -30,6 +32,7 @@ executable lindana
     build-depends:    base
                     , text
                     , lindana
+                    , filepath
                     , megaparsec >=9.0 && <9.3
     default-language: Haskell2010
     ghc-options:      -Wall
@@ -40,6 +43,7 @@ test-suite lindana-test
     other-modules:    Lindana.RuntimeSpec
                       Lindana.MachineSpec
                       Lindana.LoaderSpec
+                      Lindana.ModuleSpec
     hs-source-dirs:   test
     build-depends:    base
                     , text

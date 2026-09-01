@@ -45,7 +45,7 @@ consL :: [Expr] -> Expr
 consL = foldr (\e acc -> ETuple [e, acc]) (EAtom "Nil")
 
 machine :: [PatElem] -> [Action] -> MachineDef
-machine = MachineDef globalBag
+machine = MachineDef globalBag ""
 
 -- | Run with hooks, all initial tuples in @Global@ (the pre-§6
 -- shape the older tests were written against).
@@ -235,7 +235,7 @@ spec = do
       -- bag consumed is exactly the isolation being tested, and the
       -- §1 loop would otherwise keep the run alive (correctly).
       let globalM = machine (take1 (p1 "Work")) [Out (t [EAtom "GlobalFired"]), Die]
-          wM      = MachineDef "W" (take1 (p1 "Work"))
+          wM      = MachineDef "W" "" (take1 (p1 "Work"))
                       [Out (t [EAtom "WFired"]), Exit (int 0)]
       r <- runLoaded defaultHooks [globalM, wM]
              (Map.fromList [("W", [t [EAtom "Work"]]),
@@ -247,8 +247,8 @@ spec = do
 
     it "out emits into the machine's own bag (continuations stay home)" $ do
       -- Two workers in bag W hand off via bare out; Global never sees it.
-      let w1 = MachineDef "W" (take1 (p1 "Ping")) [Out (t [EAtom "Pong"]), Die]
-          w2 = MachineDef "W" (take1 (p1 "Pong")) [Out (t [EAtom "Done"]), Die]
+      let w1 = MachineDef "W" "" (take1 (p1 "Ping")) [Out (t [EAtom "Pong"]), Die]
+          w2 = MachineDef "W" "" (take1 (p1 "Pong")) [Out (t [EAtom "Done"]), Die]
       r <- runLoaded defaultHooks [w1, w2] (Map.singleton "W" [t [EAtom "Ping"]])
       rrBag r `shouldBe` []
       Map.lookup "W" (rrBags r) `shouldBe` Just [VTuple [VAtom "Done"]]
@@ -257,8 +257,8 @@ spec = do
       -- The tuple is lob'd before W's machine ever matches: the §6.2
       -- handoff must not lose it. out+lob in one body commit atomically.
       let feeder = machine (take1 (p1 "Go"))
-            [ Out (t [EAtom "Fed"]), Lob "W" (t [EAtom "Work", int 3]), Die ]
-          worker = MachineDef "W" (take1 (PTuple [a "Work", v "n"]))
+            [ Out (t [EAtom "Fed"]), Lob (EAtom "W") (t [EAtom "Work", int 3]), Die ]
+          worker = MachineDef "W" "" (take1 (PTuple [a "Work", v "n"]))
             [ Out (t [EAtom "Got", EVar "n"]), Die ]
       r <- runLoaded defaultHooks [feeder, worker]
              (Map.singleton globalBag [t [EAtom "Go"]])
@@ -271,12 +271,12 @@ spec = do
       -- §6.2: lob into a bag nobody matches — cheap accumulation, no
       -- machines needed for it to exist.
       let m = machine (take1 (p1 "Go"))
-            [ Lob "Log" (t [EAtom "Bar"]), Die ]
+            [ Lob (EAtom "Log") (t [EAtom "Bar"]), Die ]
       r <- runLoaded defaultHooks [m] (Map.singleton globalBag [t [EAtom "Go"]])
       Map.lookup "Log" (rrBags r) `shouldBe` Just [VTuple [VAtom "Bar"]]
 
     it "lob Global routes to the main bag" $ do
-      let m = machine (take1 (p1 "Go")) [Lob globalBag (t [EAtom "Home"]), Die]
+      let m = machine (take1 (p1 "Go")) [Lob (EAtom globalBag) (t [EAtom "Home"]), Die]
       r <- runProgram [m] [t [EAtom "Go"]]
       Map.lookup globalBag (rrBags r) `shouldBe` Nothing
       -- The match consumed (Go,); what is left is the lob'd (Home,).
@@ -352,7 +352,7 @@ spec = do
   describe "lob accumulation (§6.2 preview)" $ do
     it "lob to an unknown bag creates a machineless accumulator" $ do
       let m = machine (take1 (p1 "Go"))
-            [ Lob "Log" (t [EAtom "Bar"]), Lob "Log" (t [EAtom "Baz"]), Die ]
+            [ Lob (EAtom "Log") (t [EAtom "Bar"]), Lob (EAtom "Log") (t [EAtom "Baz"]), Die ]
       r <- runProgram [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` []           -- nothing landed in the main bag
       Map.lookup "Log" (rrBags r) `shouldBe`
@@ -381,7 +381,9 @@ spec = do
       let m = machine []
             [ BytesBind "G" (consL [int 65]), BytesDestroy (EAtom "G"), Die ]
       r <- runProgram [m] []
-      rrBytes r `shouldBe` Map.empty
+      -- Only the destroy target is gone; the §13.13 preregistered
+      -- Nil → "" entry survives (it may itself be clobbered/destroyed).
+      rrBytes r `shouldBe` Map.singleton "Nil" ""
 
     it "bytesEqual compares contents; == stays pure atom identity (§9)" $ do
       -- Gate on the (Bytes, H) completion tuples: the binds are

@@ -289,7 +289,8 @@ runCaptureSay :: [MachineDef] -> Map Name [Expr]
 runCaptureSay ms initial = do
   saidRef <- newIORef []
   let hooks = Hooks { hookSay = \s -> modifyIORef' saidRef (s :)
-                    , hookPanic = \_ -> pure () }
+                    , hookPanic = \_ -> pure ()
+                    , hookModDir = "." }
   rr <- runLoaded hooks ms initial
   said <- reverse <$> readIORef saidRef
   pure (said, rr)
@@ -297,4 +298,5 @@ runCaptureSay ms initial = do
 -- Hooks that keep end-to-end runs quiet (panic would otherwise hit
 -- real stderr).
 silentHooks :: Hooks
-silentHooks = Hooks { hookSay = \_ -> pure (), hookPanic = \_ -> pure () }
+silentHooks = Hooks
+  { hookSay = \_ -> pure (), hookPanic = \_ -> pure (), hookModDir = "." }

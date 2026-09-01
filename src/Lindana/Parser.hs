@@ -77,6 +77,7 @@ reservedWords = Set.fromList
   , "lob", "error", "panic"
   , "rand", "typeOf", "atomize", "atos"
   , "bytesBind", "bytesDestroy", "bytesEqual", "bytesRead"
+  , "import"
   ]
 
 -- | Whitespace consumer. At depth 0: spaces, tabs, CRs and @--@ line
@@ -430,6 +431,7 @@ actionP = choice
   , lobP
   , bytesBindP
   , bytesDestroyP
+  , importP
   , sayP
   , exitP
   , sleepP
@@ -451,7 +453,12 @@ ifP = do
   pure (If c t e)
 
 lobP :: Parser Action
-lobP = rword "lob" *> (Lob <$> atomIdent <*> tupleExpr)
+-- The target is usually a capitalized atom, but a lowercase variable
+-- is legal: the bag name as data (issue #17, §13.13 — modules reply
+-- into caller-named bags).
+lobP = rword "lob" *> (Lob <$> bagTarget <*> tupleExpr)
+  where
+    bagTarget = (EAtom <$> atomIdent) <|> (EVar <$> varIdent)
 
 sayP :: Parser Action
 sayP = do
@@ -490,6 +497,15 @@ bytesBindP = rword "bytesBind" *> (BytesBind <$> atomIdent <*> exprP)
 
 bytesDestroyP :: Parser Action
 bytesDestroyP = rword "bytesDestroy" *> (BytesDestroy <$> exprP)
+
+-- | Issue #17 (§13.13): @import H S Hide@ — three expressions: the
+-- module-name handle, the namespace-suffix handle, and the hide list
+-- (a cons-list of atoms; @[]@ for none). The handles' /contents/ are
+-- looked up in the bytestring side-table by the effect runner, so
+-- module names are runtime data.
+
+importP :: Parser Action
+importP = rword "import" *> (Import <$> exprP <*> exprP <*> exprP)
 
 --------------------------------------------------------------------------------
 -- Declarations & program

@@ -1,0 +1,15 @@
+-- echo: the minimal module for the §13.13 import tests. Every atom in
+-- here is namespaced by the importer's suffix (Echo_v2, Echoed_v2, …);
+-- the module replies into whatever bag the caller passes as DATA —
+-- a module cannot name the real Global (its mention of it would be
+-- mangled too); the caller shapes what happens next (§4 continuations).
+(Echo, m, reply) : lob reply (Echoed, m)
+
+(Announce, reply) : lob reply (Announced,)
+
+-- The boot witness: a one-shot declared in its own bag, so the
+-- importer's hide list can skip it. Fires once when the module is
+-- spawned, out'ing into the module's own (mangled) Boot bag.
+Boot {
+  : (Booted,)
+}

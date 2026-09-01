@@ -7,6 +7,7 @@ import Control.Exception (fromException)
 import GHC.IO.Exception (BlockedIndefinitelyOnSTM (..))
 import System.Environment (getArgs)
 import System.Exit
+import System.FilePath (takeDirectory)
 import System.IO (hPutStrLn, stderr)
 
 import qualified Data.Text.IO as TIO
@@ -14,7 +15,7 @@ import qualified Data.Text.IO as TIO
 import Text.Megaparsec.Error (errorBundlePretty)
 
 import Lindana.Loader (Loaded, loadProgram, loadedInitial, loadedMachines)
-import Lindana.Machine (defaultHooks, runLoaded, rrExit)
+import Lindana.Machine (Hooks (..), defaultHooks, runLoaded, rrExit)
 import Lindana.Parser (parseProgram)
 import Lindana.Syntax (renderProgram)
 
@@ -32,7 +33,7 @@ main = do
   args <- getArgs
   case args of
     ["--parse", path] -> dump =<< parseOrDie path
-    [path] -> loaded =<< parseOrDie path
+    [path] -> loaded path =<< parseOrDie path
     _ -> do
       putStrLn "usage: lindana [--parse] <file.lind>"
       exitFailure
@@ -47,18 +48,21 @@ main = do
 
     dump prog = putStrLn (renderProgram prog)
 
-    loaded prog = case loadProgram prog of
+    loaded path prog = case loadProgram prog of
       Left err -> do
         hPutStrLn stderr ("load error: " ++ err)
         exitFailure
-      Right l -> runIt l
+      Right l -> runIt path l
 
-    runIt :: Loaded -> IO ()
-    runIt l = do
+    runIt :: FilePath -> Loaded -> IO ()
+    runIt path l = do
+      -- Module imports (§13.13) search the main file's directory for
+      -- <name>.lind; a bare filename searches ".".
+      let hooks = defaultHooks { hookModDir = takeDirectory path }
       -- A machine blocked on a match that never arrives keeps the run
       -- alive (§1); if every thread is then blocked, the RTS raises
       -- BlockedIndefinitelyOnSTM. Report it as the deadlock it is.
-      r <- try (runLoaded defaultHooks (loadedMachines l) (loadedInitial l))
+      r <- try (runLoaded hooks (loadedMachines l) (loadedInitial l))
       case r of
         Right res -> exitWith (rrExit res)
         Left e | Just BlockedIndefinitelyOnSTM <- fromException e -> do

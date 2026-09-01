@@ -1,0 +1,8 @@
+-- outer: a module that imports another module (§13.13 recursion).
+-- Its own import of inner propagates the ambient suffix: whatever
+-- suffix outer was imported with, inner's atoms are mangled with it
+-- too. The bytesBind of InnerMod mangles, so the handle and the
+-- import's reference to it stay consistent within the module.
+: [bytesBind InnerMod "inner"; import InnerMod Nil []]
+
+(Go, reply) : lob reply (OuterHi,)
