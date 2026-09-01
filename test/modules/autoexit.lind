@@ -1,0 +1,5 @@
+-- autoexit: a module whose one-shot machine exits with 7 — the
+-- witness for the §13.13 pending-import shutdown race: every startup
+-- machine has died by the time the import effect runs, and only the
+-- imported machine can end the program.
+: exit 7

@@ -28,6 +28,22 @@
 --     'rtsBytes' and emits the @(Bytes, H)@ completion tuple into
 --     @Global@; a destroy just drops the entry.
 --
+--   * Module import (issue #17, §13.13): the @import@ effect loads a
+--     module file at runtime (via "Lindana.Import"), suffix-mangles
+--     its atoms, and spawns its machines /while the program runs/ —
+--     the RTS gains a loaded-modules registry (singleton per
+--     @(name, effective suffix)@) and a list of dynamically spawned
+--     machine threads, cancelled at shutdown like the startup ones.
+--     A module's machines carry 'Lindana.Def.MachineDef''s @machSfx@
+--     (the ambient namespace suffix): the @error@ verb routes to
+--     @Error ++ machSfx@ — the runtime equivalent of suffix-mangling
+--     that atom — and a nested @import@ propagates the ambient
+--     suffix. Import failure (missing file, parse/load error, bad
+--     handle) is a runner-safe fatal: the message goes to the panic
+--     hook and the program exits 1 — the runner thread does NOT die
+--     silently the way it does on a @say@ format error (§13.12's
+--     debugging tale).
+--
 -- §11.6 (effect-bundle grammar) is provisionally resolved here as a
 -- decision note rather than syntax: the bundle /is/ a machine
 -- reaction's post-commit action list — the 'Effect' list this
@@ -95,7 +111,8 @@ module Lindana.Machine
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
 import Control.Concurrent.STM
-import Control.Exception (finally)
+import Control.Exception (finally, try)
+import Control.Exception (SomeException)
 import Control.Monad (unless, when)
 import Data.ByteString (ByteString)
 import Data.Char (chr, ord)
@@ -109,6 +126,8 @@ import System.Random (StdGen, mkStdGen, uniformR)
 import System.Exit (ExitCode (..))
 import System.IO (hPutStrLn, stderr)
 
+import Lindana.Def (MachineDef (..), globalBag, errorBag)
+import Lindana.Import (lowerModule, parseModuleFile)
 import Lindana.Runtime
 import Lindana.Syntax
 
@@ -116,20 +135,11 @@ import Lindana.Syntax
 -- The RTS
 --------------------------------------------------------------------------------
 
--- | The name of the implicit bag bare top-level machines belong to
--- (§6). @Global@ effectively acts as the program's front door.
-globalBag :: Name
-globalBag = "Global"
-
--- | The name of the error bag (§6.4).
-errorBag :: Name
-errorBag = "Error"
-
 -- | The runtime system: @Global@'s matchable bag, the effect queue,
 -- the @rand@ seed, the live-machine count, the program exit status,
 -- the named bags (§6) — machineless @lob@ accumulators and bags
--- with machines alike; they are the same structure — and the §9
--- bytestring side-table.
+-- with machines alike; they are the same structure — the §9
+-- bytestring side-table, and the §13.13 module-import state.
 data RTS = RTS
   { rtsBag   :: RBag                  -- ^ @Global@'s bag
   , rtsQueue :: TQueue Bundle
@@ -137,7 +147,13 @@ data RTS = RTS
                                       -- via System.Random; pure + fixed
                                       -- seed, so evaluable in STM and
                                       -- runs stay deterministic
-  , rtsLive  :: TVar Int              -- ^ live machine threads
+  , rtsLive  :: TVar Int              -- ^ live machine threads, plus one
+                                      -- slot per pending (queued but not
+                                      -- yet run) @import@ effect — the
+                                      -- pending slot is what keeps the
+                                      -- run-alive check from firing while
+                                      -- an import bundle is still queued
+                                      -- (§13.13)
   , rtsExit  :: TVar (Maybe ExitCode)
   , rtsStop  :: TVar Bool             -- ^ graceful effect-runner shutdown
   , rtsBags  :: TVar (Map Name RBag)  -- ^ named bags other than @Global@
@@ -148,20 +164,41 @@ data RTS = RTS
                                       --   bytes. To the matcher a handle
                                       --   is just an ordinary atom; only
                                       --   the @bytes*@ verbs reach in.
+                                      --   Preregistered: @Nil → ""@ —
+                                      --   the free empty import suffix
+                                      --   (§13.13); not special, may be
+                                      --   clobbered or destroyed like
+                                      --   any handle.
+  , rtsMods  :: TVar (Map (Name, String) ())  -- ^ §13.13 module registry:
+                                      --   (search name, effective suffix)
+                                      --   pairs already loaded — modules
+                                      --   are singletons; also what makes
+                                      --   import cycles terminate
+  , rtsExtra :: TVar [Async ()]       -- ^ §13.13 machine threads spawned
+                                      --   by @import@ mid-run, cancelled
+                                      --   at shutdown like the startup ones
   , rtsHooks :: Hooks
   }
 
--- | Injectable effect targets, so tests can observe @say@\/@panic@
--- without touching real stdio.
+-- | Injectable effect targets and environment, so tests can observe
+-- @say@\/@panic@ without touching real stdio and point module
+-- searches wherever the fixtures are.
 data Hooks = Hooks
-  { hookSay   :: String -> IO ()   -- ^ default: stdout
-  , hookPanic :: String -> IO ()   -- ^ default: stderr
+  { hookSay    :: String -> IO ()   -- ^ default: stdout
+  , hookPanic  :: String -> IO ()   -- ^ default: stderr
+  , hookModDir :: FilePath          -- ^ directory @import@ searches for
+                                    --   @<name>.lind@ module files
+                                    --   (§13.13); default: @"."@. The
+                                    --   CLI sets it to the main file's
+                                    --   directory. Provisional home for
+                                    --   this knob (flip-worthy).
   }
 
 defaultHooks :: Hooks
 defaultHooks = Hooks
-  { hookSay   = putStrLn
-  , hookPanic = hPutStrLn stderr . ("panic: " ++)
+  { hookSay    = putStrLn
+  , hookPanic  = hPutStrLn stderr . ("panic: " ++)
+  , hookModDir = "."
   }
 
 -- | A fresh RTS (fixed @rand@ seed: deterministic runs).
@@ -177,10 +214,18 @@ newRTSWith hooks = atomically $ do
   stop  <- newTVar False
   seed  <- newTVar (mkStdGen 12345)
   bags  <- newTVar Map.empty
-  bytes <- newTVar Map.empty
+  -- §13.13: one bytestring preregistered — Nil → "". This is what
+  -- makes @import H Nil […]@ the spelling of "no suffix" (the empty
+  -- suffix is allowed but a bad idea — no namespacing). The entry is
+  -- not special: bytesBind Nil … or bytesDestroy Nil clobbers/drops
+  -- it like any handle.
+  bytes <- newTVar (Map.singleton "Nil" (encodeUtf8 (T.pack "")))
+  mods  <- newTVar Map.empty
+  extra <- newTVar []
   pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
            , rtsLive = live, rtsExit = exit, rtsStop = stop
-           , rtsBags = bags, rtsBytes = bytes, rtsHooks = hooks
+           , rtsBags = bags, rtsBytes = bytes
+           , rtsMods = mods, rtsExtra = extra, rtsHooks = hooks
            }
 
 -- | Resolve a bag name to its 'RBag' (§6). @Global@ is the main bag;
@@ -220,14 +265,10 @@ lobSTM rts bagName t = do
 -- Machines
 --------------------------------------------------------------------------------
 
--- | A machine definition: the bag it matches in (§6), its join
--- pattern (left) and action list (right). The @Def@ suffix
--- disambiguates from Syntax's @Machine@ Decl constructor.
-data MachineDef = MachineDef
-  { machBag  :: Name        -- ^ bag whose block the machine was declared in
-  , machJoin :: [PatElem]
-  , machBody :: [Action]
-  } deriving (Eq, Show)
+-- MachineDef now lives in "Lindana.Def" (imported and re-exported
+-- above): the import machinery ("Lindana.Import", used by the
+-- effect runner below) needs it too, and it must not depend on the
+-- machine layer — see the Def module header.
 
 -- | A bundle of deferred effects (§7.2): queued post-commit, drained
 -- FIFO by the effect-runner, one bundle live at a time.
@@ -250,6 +291,14 @@ data Effect
                           --   the deterministic gate for consumers)
   | EffBytesDestroy Name  -- ^ @bytesDestroy H@ (§9) — drop the entry;
                           --   later lookups are the user's to guard
+  | EffImport Name Name [Name] String
+                          -- ^ @import H S Hide@ (§13.13) — load a module
+                          --   at runtime: name handle, suffix handle,
+                          --   hidden bag names, ambient suffix. Carries
+                          --   /handles/, not contents: the bytes are
+                          --   read at effect time, so a rebind between
+                          --   commit and run is honored. Fails as a
+                          --   runner-safe fatal (see module header).
   deriving (Eq, Show)
 
 --------------------------------------------------------------------------------
@@ -349,8 +398,14 @@ typeTag VTuple{}  = "Tuple"
 -- idiom (@(c!, a + b)@) only works if the continuation lands where
 -- the matching machines are. Cross-bag traffic goes through @lob@
 -- exclusively (§6.1).
-interpretActions :: RTS -> RBag -> Env -> [Action] -> STM ([Effect], Bool)
-interpretActions rts bag env = go []
+--
+-- The @sfx@ argument is the machine's ambient namespace suffix
+-- (§13.13, 'Lindana.Def.MachineDef'’s @machSfx@): @error@ routes to
+-- @Error ++ sfx@ — the runtime equivalent of suffix-mangling that
+-- atom in an imported module's source — and @import@ propagates the
+-- ambient suffix to everything the import loads.
+interpretActions :: RTS -> RBag -> String -> Env -> [Action] -> STM ([Effect], Bool)
+interpretActions rts bag sfx env = go []
   where
     go acc [] = pure (reverse acc, True)
     go acc (act : rest) = case act of
@@ -358,7 +413,11 @@ interpretActions rts bag env = go []
         t <- evalR rts env e
         outSTM bag t
         go acc rest
-      Lob bagName e -> do
+      Lob bagNameE e -> do
+        n <- evalR rts env bagNameE
+        bagName <- case n of
+          VAtom bn -> pure bn
+          _ -> error "lob: target must be an atom (a bag name, §6.1)"
         t <- evalR rts env e
         lobSTM rts bagName t
         go acc rest
@@ -377,8 +436,11 @@ interpretActions rts bag env = go []
         pure (reverse (EffPanic v : acc), False)
       Raise e -> do
         t <- evalR rts env e
-        ebag <- bagForSTM rts errorBag
-        outSTM ebag (errorTuple t)
+        -- §13.13: a module's error verb routes to its own mangled
+        -- Error bag (Error ++ ambient suffix); at top level sfx is
+        -- "" and this is the plain Error bag (§6.4).
+        ebag <- bagForSTM rts (errorBag ++ sfx)
+        outSTM ebag (errorTuple (errorBag ++ sfx) t)
         go acc rest
       BytesBind h e -> do
         cps <- codepoints <$> evalR rts env e
@@ -389,6 +451,19 @@ interpretActions rts bag env = go []
           VAtom n -> pure n
           _ -> error "bytesDestroy: handle must be an atom (§9)"
         go (EffBytesDestroy n : acc) rest
+      Import nh sh hide -> do
+        -- §13.13: a pending-import slot in the live count, claimed
+        -- NOW in-transaction. The run-alive check (@live == 0@) must
+        -- not fire while an import bundle is still queued — all
+        -- startup machines may have died since it was queued. The
+        -- effect settles the slot: +k machines − 1 slot when it
+        -- loads, −1 on skip or failure.
+        modifyTVar' (rtsLive rts) (+ 1)
+        nhv <- evalR rts env nh
+        shv <- evalR rts env sh
+        hv  <- evalR rts env hide
+        hs <- atomList hv
+        go (EffImport (atomHandle nhv) (atomHandle shv) hs sfx : acc) rest
       If c th el -> do
         b <- truthy <$> evalR rts env c
         go acc ((if b then th else el) ++ rest)
@@ -407,13 +482,37 @@ interpretActions rts bag env = go []
 codepoints :: Val -> [Int]
 codepoints = map ord . casualString
 
+-- | §13.13: @import@'s name and suffix arguments must be bytestring
+-- handles — atoms (the contents are looked up in the side-table by
+-- the effect). Anything else is the provisional Haskell-level error,
+-- same routing as the other action-layer checks (§3.3).
+atomHandle :: Val -> Name
+atomHandle (VAtom n) = n
+atomHandle _ =
+  error "import: name and suffix must be bytestring handles (atoms, §13.13)"
+
+-- | §13.13: the hide list is a cons-list of atoms (the §11.5 list
+-- literal shape, or @[]@) naming module bags whose machines are not
+-- imported ('Lindana.Import.hideBags' matches pre-mangle names).
+atomList :: Val -> STM [Name]
+atomList (VAtom "Nil")            = pure []
+atomList (VTuple [VAtom n, rest]) = (n :) <$> atomList rest
+atomList (VTuple _) =
+  error "import: hide list elements must be atoms (§13.13)"
+atomList _ =
+  error "import: hide list must be a cons-list of atoms (§13.13)"
+
 -- | @error e@ (§6.4): an @(Error, …)@ tuple into the named @Error@
 -- bag (conceptually sugar over @lob Error …@); a tuple argument's
 -- contents are spliced in. With no user @Error@ declarations the
 -- loader installs the default machine @(c!) : panic c@; an empty
 -- user @Error { }@ block means "silently swallow all errors".
-errorTuple :: Val -> Val
-errorTuple v = VTuple (VAtom "Error" : case v of
+-- The @tag@ argument is the tuple's leading atom: @Error@ at top
+-- level, @Error ++ suffix@ for an imported module's machines (§13.13)
+-- — so a module's own @Error { … }@ handler block, mangled the same
+-- way, matches its own error tuples; the tag travels with the bag.
+errorTuple :: Name -> Val -> Val
+errorTuple tag v = VTuple (VAtom tag : case v of
   VTuple vs -> vs
   _         -> [v])
 
@@ -442,7 +541,7 @@ machineThread rts bag m = go `finally` decLive
     go
       | null (machJoin m) = do   -- §1: one-shot, unconditionally, at start
           (effs, _) <- atomically
-            (interpretActions rts bag Map.empty (machBody m))
+            (interpretActions rts bag (machSfx m) Map.empty (machBody m))
           push effs
           pure ()                -- implicitly terminates after firing
       | otherwise = loop
@@ -458,7 +557,7 @@ machineThread rts bag m = go `finally` decLive
             -- transaction so its tuple-space writes land atomically
             -- with the match (the §8.2 note); irrevocables come back
             -- as a deferred bundle for the effect-runner (§7.2).
-            interpretActions rts bag (matchEnv mt) (machBody m)
+            interpretActions rts bag (machSfx m) (matchEnv mt) (machBody m)
       push effs
       when survived loop
 
@@ -526,6 +625,110 @@ runBundle rts = go
         go es
       EffBytesDestroy h ->
         atomically (modifyTVar' (rtsBytes rts) (Map.delete h)) >> go es
+      EffImport nh sh hidden sfx -> do
+        -- §13.13: settle the pending-import slot (claimed when the
+        -- action was interpreted) and load. Everything fallible is
+        -- contained here: a failed import is a runner-safe fatal
+        -- (panic hook + exit 1) rather than a silent runner death —
+        -- the program would otherwise deadlock with no one to say so.
+        ex <- readTVarIO (rtsExit rts)
+        if isJust ex
+          then atomically (modifyTVar' (rtsLive rts) (subtract 1))
+          else do
+            r <- try (importOnce rts nh sh hidden sfx)
+            case r of
+              Right (Right ()) -> pure ()
+              Right (Left err) -> importFailed rts err
+              Left exc         -> importFailed rts (show (exc :: SomeException))
+        go es
+
+-- | §13.13, the @import@ effect's load path. Left = failure message
+-- (turned into a fatal @panic@ by 'runBundle'). Reads the name and
+-- suffix handles' /contents/ from the side-table at effect time,
+-- consults the loaded-modules registry (singleton per
+-- @(name, effective suffix)@ — also what makes import cycles
+-- terminate), and on a fresh pair parses, hides, mangles, lowers,
+-- outs the module's initial tuples, emits the @(Imported, H, suffix)@
+-- completion tuple into @Global@, and spawns the module's machines
+-- mid-run.
+importOnce :: RTS -> Name -> Name -> [Name] -> String
+           -> IO (Either String ())
+importOnce rts nh sh hidden sfx = do
+  em <- readTVarIO (rtsBytes rts)
+  case (decodeName =<< Map.lookup nh em,
+        decodeName =<< Map.lookup sh em) of
+    (Just nm, Just sfxW) -> do
+      let eff = sfx ++ sfxW
+          key = (nm, eff)
+      fresh <- atomically $ do
+        seen <- readTVar (rtsMods rts)
+        if Map.member key seen
+          then pure False
+          else writeTVar (rtsMods rts) (Map.insert key () seen) >> pure True
+      if not fresh
+        -- Repeat import: module singletons (first import wins —
+        -- a later hide list has no effect; documented hazard).
+        -- Still emit the completion tuple: consumers gate on it
+        -- regardless of whether the load was fresh.
+        then emitImported rts nh eff >> pure (Right ())
+        else do
+          ep <- parseModuleFile (hookModDir (rtsHooks rts)) nm
+          case ep of
+            Left err   -> pure (Left err)
+            Right prog -> case lowerModule hidden eff prog of
+              Left err   -> pure (Left err)
+              Right (ms, ini) -> do
+                installModule rts ms ini
+                emitImported rts nh eff
+                pure (Right ())
+    _ -> pure (Left
+      ("unknown bytestring handle(s) for name/suffix: " ++ nh ++ ", " ++ sh))
+  where
+    decodeName bs = case decodeUtf8' bs of
+      Right t -> Just (T.unpack t)
+      Left _  -> Nothing    -- provisional: invalid UTF-8 = missing handle
+
+-- | §13.13: install a freshly loaded module — initial tuples out'd
+-- (one transaction, so module machines wake to a fully-populated
+-- bag), live count credited with the new machines (minus the pending
+-- slot this effect settles), machine threads spawned and recorded
+-- for shutdown cancellation.
+installModule :: RTS -> [MachineDef] -> Map Name [Expr] -> IO ()
+installModule rts ms ini = do
+  atomically $ do
+    mapM_ (\(n, es) ->
+              mapM_ (\e -> do
+                       v <- evalR rts Map.empty e
+                       b <- bagForSTM rts n
+                       outSTM b v)
+                 es)
+          (Map.toList ini)
+    modifyTVar' (rtsLive rts) (+ (length ms - 1))
+  mbags <- mapM (\m -> (,) m <$> atomically (bagForSTM rts (machBag m))) ms
+  as <- mapM (\(m, b) -> async (machineThread rts b m)) mbags
+  atomically (modifyTVar' (rtsExtra rts) (++ as))
+
+-- | §13.13: the @(Imported, H, suffix)@ completion tuple lands in
+-- @Global@ — the same deterministic-gate idiom as @(Bytes, H)@. @H@
+-- is the name handle /as written in the import action/; two imports
+-- through the same handle at different times are indistinguishable
+-- in the gate (documented hazard).
+emitImported :: RTS -> Name -> String -> IO ()
+emitImported rts nh eff = atomically $ do
+  b <- bagForSTM rts globalBag
+  outSTM b (VTuple [VAtom "Imported", VAtom nh, stringVal eff])
+
+-- | §13.13: a failed import is fatal, but /runner-safe/: the message
+-- goes to the panic hook and the program exits 1, instead of the
+-- exception killing the effect-runner thread silently (the §13.12
+-- debugging tale — every later effect, including @exit@, would then
+-- never run).
+importFailed :: RTS -> String -> IO ()
+importFailed rts err = do
+  hookPanic (rtsHooks rts) ("import failed: " ++ err)
+  atomically $ do
+    modifyTVar' (rtsLive rts) (subtract 1)
+    writeTVar (rtsExit rts) (Just (ExitFailure 1))
 
 setExit :: RTS -> ExitCode -> STM ()
 setExit rts c = writeTVar (rtsExit rts) (Just c)
@@ -628,11 +831,14 @@ runLoaded hooks machines initial = do
     live <- readTVar (rtsLive rts)
     ex   <- readTVar (rtsExit rts)
     check (live <= (0 :: Int) || isJust ex)
-  -- Shutdown: machines first (no new bundles after this), then ask
-  -- the runner to stop; it finishes the current bundle and drains the
-  -- queue, so every queued bundle is fully executed before
-  -- runProgram returns.
+  -- Shutdown: machines first (no new bundles after this) — both the
+  -- startup threads and any the @import@ effect spawned mid-run
+  -- (§13.13) — then ask the runner to stop; it finishes the current
+  -- bundle and drains the queue, so every queued bundle is fully
+  -- executed before runProgram returns.
   mapM_ cancel mths
+  extras <- readTVarIO (rtsExtra rts)
+  mapM_ cancel extras
   atomically (writeTVar (rtsStop rts) True)
   wait runner
   bag   <- bagContents (rtsBag rts)

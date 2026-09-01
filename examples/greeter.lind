@@ -1,0 +1,8 @@
+-- greeter: a tiny module, loaded at runtime by examples/imports.lind.
+-- Every atom in here is namespaced by the importer's suffix: imported
+-- with "_v2", the machine below is (Greet_v2, who, reply) and emits
+-- (Hello_v2, who). The reply goes to whatever bag the caller passes
+-- as DATA — this module cannot name the real Global (its mention of
+-- it would be mangled along with everything else); the caller shapes
+-- what happens next (§4 continuations).
+(Greet, who, reply) : lob reply (Hello, who)

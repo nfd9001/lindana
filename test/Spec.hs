@@ -5,17 +5,20 @@ module Main (main) where
 import qualified Data.Text as T
 
 import Control.Monad (void)
+import Data.Char (ord)
 import Data.Either (isLeft)
 
 import Test.Hspec
 
 import Lindana.Parser (parseProgram)
+import Lindana.Import (mangleProgram)
 import Lindana.MachineSpec (spec)
 import qualified Lindana.LoaderSpec as LoaderSpec
+import qualified Lindana.ModuleSpec as ModuleSpec
 import qualified Lindana.RuntimeSpec as RuntimeSpec
 import Lindana.Syntax
   ( Action (..), Decl (..), Expr (..), Pat (..), PatElem (..)
-  , ReadMode (..), Program, progDecls, renderProgram
+  , ReadMode (..), Program (..), progDecls, renderProgram
   )
 import Text.Megaparsec.Error (errorBundlePretty)
 
@@ -62,6 +65,11 @@ roundTrips src = case parseProgram src of
   Right p -> case parseProgram (T.pack (renderProgram p)) of
     Right p' -> p' == p
     Left _   -> False
+
+-- | A casual-string expression in its desugared shape (§9): a
+-- codepoint cons-list — handy for asserting on mangled ASTs.
+str :: String -> Expr
+str = foldr (\c e -> ETuple [EInt (toInteger (ord c)), e]) (EAtom "Nil")
 
 main :: IO ()
 main = hspec $ do
@@ -218,6 +226,41 @@ main = hspec $ do
         roundTrips ": bytesBind Greeting [72, 105]\n(H,) : [bytesDestroy H; if bytesEqual(H, H) then die else die]"
           `shouldBe` True
 
+    describe "import action (§13.13, issue #17)" $ do
+      it "parses import with name handle, suffix handle, hide list" $ do
+        p <- parseOk "(H,) : import H S [Log]"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PAtom "H"])]
+                   [Import (EAtom "H") (EAtom "S")
+                           (ETuple [EAtom "Log", EAtom "Nil"])]]
+      it "parses the empty suffix/hide spelling: import H Nil []" $ do
+        p <- parseOk ": import H Nil []"
+        progDecls p `shouldBe`
+          [Machine [] [Import (EAtom "H") (EAtom "Nil") (EAtom "Nil")]]
+      it "reserves import (no variable named import)" $
+        isLeft (parseProgram "(import,) : die")
+      it "round-trips (the hide list renders as its cons-list)" $
+        roundTrips ": [bytesBind M \"m\"; import M S [Log, Debug]]" `shouldBe` True
+      it "mangles every atom in a module's source with the suffix" $ do
+        p <- parseOk $ T.unlines
+          [ "Log { (Ping,) : lob Log (m,) }"
+          , "(Ping,) : [lob Log (m,); (Done, Greeting)]"
+          ]
+        case mangleProgram "_v2" p of
+          Program [Bag "Log_v2" [Machine [PatElem Take (PTuple [PAtom "Ping_v2"])]
+                                          [Lob (EAtom "Log_v2") (ETuple [EVar "m"])]]
+                  ,Machine [PatElem Take (PTuple [PAtom "Ping_v2"])]
+                           [Lob (EAtom "Log_v2") (ETuple [EVar "m"]),
+                            Out (ETuple [EAtom "Done_v2", EAtom "Greeting_v2"])]]
+            -> pure ()
+          other -> expectationFailure ("unexpected mangling: " ++ show other)
+      it "leaves variables, strings, and the hide list alone" $ do
+        p <- parseOk ": [import InnerMod Nil [Boot]; (Go, \"hi\")]"
+        progDecls (mangleProgram "_r" p) `shouldBe`
+          [Machine []
+            [Import (EAtom "InnerMod_r") (EAtom "Nil") (ETuple [EAtom "Boot", EAtom "Nil"])
+            , Out (ETuple [EAtom "Go_r", str "hi"])]]
+
     it "parses a no-LHS machine (§1 one-shot): the issue #7 Hello World" $ do
       p <- parseOk $ T.unlines
         [ ": [say \"Hello world!\"; (Stop, 0)]"
@@ -228,5 +271,6 @@ main = hspec $ do
   spec
   LoaderSpec.spec
   RuntimeSpec.spec
+  ModuleSpec.spec
   where
     shouldHaveLength xs n = length xs `shouldBe` n

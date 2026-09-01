@@ -1,0 +1,5 @@
+-- noisy: a module whose error calls go to ITS OWN mangled Error bag
+-- (Error ++ suffix, §13.13). It declares no Error handler block, so
+-- the §6.4 default machine — installed by the import on the mangled
+-- bag — turns the error into a fatal panic.
+(Boom, reply) : [lob reply (AboutTo,); error ("bad", reply)]

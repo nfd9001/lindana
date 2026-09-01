@@ -1,0 +1,28 @@
+-- Module import (issue #17, §13.13): greeter is loaded at runtime
+-- from greeter.lind (modules are searched in the main file's
+-- directory), with namespace suffix "_v2" — every atom in the
+-- module's source is suffixed, so we trigger Greet_v2 and match its
+-- (Hello_v2, who) reply. The suffix is data: a bytestring handle
+-- whose contents the import effect reads (Nil → "" is preregistered,
+-- so `import H Nil []` spells "no suffix" — allowed, but a bad idea:
+-- no namespacing). The (Imported, H, suffix) completion tuple into
+-- Global is the deterministic gate, same idiom as (Bytes, H).
+--
+-- The module's reply lands in whatever bag we pass as data (Outbox):
+-- a module can't name the real Global — its atom mentions are
+-- mangled — so the caller shapes what happens next (§4).
+
+-- Two §1 one-shots bind the module name and suffix as bytestrings;
+-- their (Bytes, H) completions gate the import.
+: bytesBind Greeter "greeter"
+: bytesBind Suffix "_v2"
+
+{ (Start,) }
+
+(Bytes, Greeter), (Bytes, Suffix), (Start,) : import Greeter Suffix []
+
+(Imported, Greeter, "_v2") : (Greet_v2, "world", Outbox)
+
+Outbox {
+  (Hello_v2, who) : [say "greeter says: hello, %s" who; exit 0]
+}

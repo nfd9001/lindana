@@ -41,7 +41,9 @@ type Name = String
 
 -- | A whole program: a sequence of top-level declarations
 -- (initial-bag block, bag blocks, bare machines for the implicit
--- @Global@ bag).
+-- @Global@ bag). A loaded /module/ is also a 'Program' — the import
+-- effect parses one and suffix-mangles every atom in it before
+-- lowering (see "Lindana.Import").
 newtype Program = Program { progDecls :: [Decl] }
   deriving (Eq, Show)
 
@@ -94,7 +96,16 @@ data Expr
 
 data Action
   = Out Expr                    -- ^ bare tuple emission (the default action).
-  | Lob Name Expr               -- ^ @lob Bag (...)@ — cross-bag send (§6.1).
+  | Lob Expr Expr               -- ^ @lob Bag (...)@ — cross-bag send (§6.1).
+                                --   The target is an expression: normally
+                                --   an atom (the bag's name as declared),
+                                --   but a /variable@ is legal too — the
+                                --   bag name travels as data (issue #17,
+                                --   §13.13: modules reply into whatever
+                                --   bag the caller names, since their
+                                --   own mentions of @Global@ are mangled
+                                --   away). Must evaluate to an atom.
+                                --   Provisional extension, flip-worthy.
   | Say String [Expr]           -- ^ @say "fmt" args...@ — console side effect.
                                 --   The format literal stays a raw
                                 --   'String' on purpose: the say-position
@@ -115,6 +126,21 @@ data Action
                                 --   once the side-table write lands.
   | BytesDestroy Expr           -- ^ @bytesDestroy e@ (§9) — drop the handle's
                                 --   side-table entry (manual lifetime).
+  | Import Expr Expr Expr       -- ^ @import H S Hide@ (issue #17, §13.13) —
+                                --   load a module at runtime. @H@ and @S@
+                                --   evaluate to bytestring /handles/: the
+                                --   module name to search for and the
+                                --   namespace suffix (empty allowed — the
+                                --   runtime preregisters @Nil@ as @""@,
+                                --   though an empty suffix is a bad idea:
+                                --   no namespacing). @Hide@ is a list of
+                                --   atoms naming module bags whose machines
+                                --   are not imported. The effective suffix
+                                --   (ambient, from the enclosing module,
+                                --   plus @S@) is applied recursively — to
+                                --   every atom in the module's source and
+                                --   to every import the module itself
+                                --   performs. See "Lindana.Import".
   | If Expr [Action] [Action]   -- ^ Terse @if@; branches are action sequences.
   deriving (Eq, Show)
 
@@ -156,7 +182,7 @@ renderActionSeq as  = "[" ++ intercalate "; " (map renderAction as) ++ "]"
 
 renderAction :: Action -> String
 renderAction (Out e)      = renderExpr e
-renderAction (Lob n e)    = "lob " ++ n ++ " " ++ renderExpr e
+renderAction (Lob n e)    = "lob " ++ renderExpr n ++ " " ++ renderExpr e
 renderAction (Say f es)   = unwords ("say" : show f : map renderExpr es)
 renderAction (Exit e)     = "exit " ++ renderExpr e
 renderAction Die          = "die"
@@ -165,6 +191,8 @@ renderAction (Panic e)    = "panic " ++ renderExpr e
 renderAction (Raise e)    = "error " ++ renderExpr e
 renderAction (BytesBind h e) = "bytesBind " ++ h ++ " " ++ renderExpr e
 renderAction (BytesDestroy e) = "bytesDestroy " ++ renderExpr e
+renderAction (Import h s hide) =
+  unwords ["import", renderExpr h, renderExpr s, renderExpr hide]
 renderAction (If c t e)   =
   "if " ++ renderExpr c ++ " then " ++ renderActionSeq t
   ++ " else " ++ renderActionSeq e

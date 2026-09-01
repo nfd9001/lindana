@@ -32,12 +32,13 @@ module Lindana.Loader
   ( -- * Loading
     Loaded (..)
   , loadProgram
+  , loadProgramWith
   ) where
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 
-import Lindana.Machine (MachineDef (..), globalBag, errorBag)
+import Lindana.Def (MachineDef (..), globalBag, errorBag)
 import Lindana.Syntax
 
 -- | A lowered program: bag-tagged machine definitions and per-bag
@@ -50,8 +51,21 @@ data Loaded = Loaded
   } deriving (Eq, Show)
 
 -- | Lower a 'Program', or fail with a human-readable load error.
+-- The §6.4 default @Error@ machine is installed on the plain @Error@
+-- bag — the top-level entry point.
 loadProgram :: Program -> Either String Loaded
-loadProgram (Program ds) = do
+loadProgram = loadProgramWith errorBag
+
+-- | 'loadProgram' with the §6.4 default Error machine's bag name as a
+-- parameter: modules imported at runtime (issue #17, §13.13) mangle
+-- every atom in their source with a namespace suffix, and their
+-- @error@ verb routes to the mangled Error bag — so when the module
+-- declares no Error bag of its own, the default @panic@ machine goes
+-- there too. The mangling itself happens before lowering (see
+-- "Lindana.Import"); this only decides where the default machine
+-- matches.
+loadProgramWith :: Name -> Program -> Either String Loaded
+loadProgramWith errBag (Program ds) = do
   -- Top level: bag blocks, at most one initial block (Global's), and
   -- (maybe) bare machines for the implicit Global bag.
   (topInit, topMachs, bagBlocks) <- walkTop ds Nothing [] []
@@ -75,8 +89,10 @@ loadProgram (Program ds) = do
         -- §6.4: the default Error machine exists only when the program
         -- declares no Error bag of its own — a user block, even empty,
         -- fully replaces it; the default never coexists with one.
-        | errorBag `elem` bagNames = []
-        | otherwise                = [defaultErrorMachine]
+        -- @errBag@ is the plain Error bag at top level, the mangled
+        -- @Error ++ suffix@ for an imported module (§13.13).
+        | errBag `elem` bagNames = []
+        | otherwise              = [defaultErrorMachine errBag]
       initialMap = Map.fromList [ (n, es) | (n, Just es) <- globalInit : bagInits ]
       globalInit = (globalBag, topInit)
   pure Loaded
@@ -84,19 +100,26 @@ loadProgram (Program ds) = do
     , loadedInitial  = initialMap
     }
 
--- | The §6.4 default Error machine: @(c!) : panic c@. The rest
+-- | The §6.4 default Error machine: @(c!) : panic c@, installed on
+-- the given bag name (plain @Error@ at top level, the mangled
+-- @Error ++ suffix@ for an imported module, §13.13). The rest
 -- capture (§11.1) matches any tuple — which is all the Error bag
 -- ever accumulates — and binds the whole thing to @c@ for @panic@.
-defaultErrorMachine :: MachineDef
-defaultErrorMachine = MachineDef
-  { machBag  = errorBag
+defaultErrorMachine :: Name -> MachineDef
+defaultErrorMachine bag = MachineDef
+  { machBag  = bag
+  , machSfx  = ""      -- the default machine speaks for the module itself;
+                       -- the error routing that matters is its BAG name
   , machJoin = [PatElem Take (PTuple [PRest "c"])]
   , machBody = [Panic (EVar "c")]
   }
 
--- | Tag a machine with its bag.
+-- | Tag a machine with its bag (ambient suffix empty — top-level and
+-- pre-import lowering; "Lindana.Import.lowerModule" sets @machSfx@
+-- for loaded modules).
 machine :: Name -> Decl -> MachineDef
-machine bag (Machine lhs body) = MachineDef bag lhs body
+machine bag (Machine lhs body) =
+  MachineDef bag "" lhs body
 machine _ d = error ("loader invariant: non-machine reached machine(): " ++ show d)
 
 -- | Walk the top-level declarations.

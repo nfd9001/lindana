@@ -1,0 +1,7 @@
+-- handled: same error call as noisy, but this module declares its own
+-- Error { … } block — which mangles to the module's error bag along
+-- with everything else, so the module handles its own errors. The
+-- error tuple's leading atom travels with the bag: Error ++ suffix.
+(Boom, reply) : [lob reply (AboutTo,); error ("bad", reply)]
+
+Error { (Error, msg, reply) : lob reply (Caught, msg) }

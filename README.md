@@ -33,11 +33,22 @@ Git history might be a better source-of-truth about recent progress until I've e
 - `src/Lindana/Runtime.hs` — the STM tuple bag and structural
   matcher (§3): racing matches, join patterns, `rd`/`in`, rest
   capture (§11.1).
+- `src/Lindana/Def.hs` — the lowered machine shape (`MachineDef`)
+  and reserved bag names, shared by loader, import, and machine
+  layers (kept in its own module so "Lindana.Import" can sit between
+  loader and machine without a cycle).
+- `src/Lindana/Import.hs` — module loading (issue #17, §13.13):
+  finds `<name>.lind` at runtime, drops hidden bags' machines,
+  suffix-mangles every atom in the module's source, and lowers it
+  with the module's own mangled Error bag.
 - `src/Lindana/Machine.hs` — the machine loop/scheduler (§1, §2),
   the two-phase action layer + effect-runner (§7.2), the named
-  bag machinery (§6), and the §9 bytestring side-table
-  (`rtsBytes`): one thread per machine, `out` is same-bag,
-  `lob` crosses bags, cross-bag atomicity for free.
+  bag machinery (§6), the §9 bytestring side-table (`rtsBytes`):
+  one thread per machine, `out` is same-bag, `lob` crosses bags,
+  cross-bag atomicity for free. Also owns the §13.13 `import`
+  effect: spawns module machines mid-run, keeps the module registry
+  (singleton per name + suffix), and emits the `(Imported, H, suffix)`
+  completion gate.
 - `src/Lindana/Loader.hs` — the program loader: lowers a parsed
   `Program` into bag-tagged machines + per-bag initial tuples,
   enforces the §6 declaration rules, and installs the §6.4 default
@@ -53,10 +64,12 @@ Git history might be a better source-of-truth about recent progress until I've e
   and decoding; `chars.lind` (§9, issue #12) shows character sugar
   matching, consing into strings, and building bytestrings;
   `bytes.lind` (§9) binds bytestring handles and
-  contrasts `bytesEqual` with `==`; `brainfuck.lind` (§13.12) is a
-  Brainfuck interpreter — zipper program and tape, jump-table
-  brackets, CPS reversal via `!` splice — that runs the classic
-  Hello World!; `throttle.lind` (§8.2) is a
+  contrasts `bytesEqual` with `==`; `imports.lind` + `greeter.lind`
+  (§13.13) load a module at runtime with a namespace suffix and
+  gate on the `(Imported, …)` completion tuple; `brainfuck.lind`
+  (§13.12) is a Brainfuck interpreter — zipper program and tape,
+  jump-table brackets, CPS reversal via `!` splice — that runs the
+  classic Hello World!; `throttle.lind` (§8.2) is a
   deliberately non-terminating long-runner — the CLI reports it as a
   deadlock when every machine ends up blocked.
 
@@ -105,7 +118,12 @@ initial-bag blocks, named bag blocks, the §9 bytestring side-table
 (opaque atom handles; `==` is pure atom identity, `bytesEqual`
 compares contents; binds emit a `(Bytes, H)` completion tuple;
 `bytesRead` decodes a handle back into the codepoint list — a string
-in and out of ByteString is the identity, §9/issue #12).
+in and out of ByteString is the identity, §9/issue #12), and module
+import (§13.13, issue #17, provisional: `import H S Hide` loads
+`<name>.lind` at runtime from bytestring handles, suffix-mangles its
+atoms — a namespace — and spawns its machines mid-run; hide lists
+skip bags; `Nil → ""` is preregistered so the empty suffix is free;
+`lob`'s target may be a variable: bag names as data).
 Effect bundles need no syntax (§11.6, provisionally resolved): a
 reaction's post-commit action list *is* the bundle.
 
