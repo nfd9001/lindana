@@ -9,3 +9,4 @@ Work follows the pattern of the existing merged PRs (`git log` shows it). In sho
 - **Docs travel with code**: update the handover (new §13.x subsection; mark any §11 items provisionally resolved with branch refs) and README in the same PR.
 - **Provisional is fine**: decisions are "provisional / flip-worthy" and recorded, not litigated. Hazards are documented, not guarded.
 - **Bar to merge**: full test suite green (randomized order), zero `-Wall` warnings; new examples verified via CLI and `--parse` round-trip.
+- **Humans merge.** Agents open PRs and stop; only a human merges (including via `gh pr merge`), even when the agent's account has merged previous PRs. Passing the bar to merge does not authorize an agent to click the button.
