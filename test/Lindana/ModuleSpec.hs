@@ -179,3 +179,74 @@ spec = describe "module import (§13.13, issue #17)" $ do
     -- and its say bundle was queued before the panic: FIFO order says
     -- it ran.
     said `shouldBe` ["about"]
+
+  -- §13.14 (issue #17): the error-reroute effect, end to end. The
+  -- reroute commits in the same transaction that emits the (Routed,)
+  -- witness, so when Boom_x fires the table is certainly installed —
+  -- no startup race.
+  describe "error reroute (§13.14, issue #17)" $ do
+    it "top level collects a module's errors: reroute Error_v2 Sink" $ do
+      -- Module-wide spelling: naming the module's mangled Error bag
+      -- reroutes "all bags in the module". The collector machine's
+      -- pattern keys on the tag (Error_v2 — stable provenance), not
+      -- on its own bag's name.
+      (said, panics, rr) <- runMain $ unlines $
+        preamble "noisy" "_v2" ++
+        [ "(Bytes, Sfx) : import Mod Sfx []"
+        , "(Imported, Mod, \"_v2\") : [reroute Error_v2 Sink; (Routed,)]"
+        , "(Routed,) : (Boom_v2, Go)"
+        , "Sink { (Error_v2, \"bad\", r) : [say \"collected %a\" r; exit 0] }"
+        ]
+      said `shouldBe` ["collected Go"]
+      panics `shouldBe` []
+      rrExit rr `shouldBe` ExitSuccess
+      -- The §6.4 default machine on the mangled bag (installed by the
+      -- import — noisy declares no Error block) never fired: the tuple
+      -- went to Sink instead, and the mangled bag sits empty.
+      Map.lookup "Error_v2" (rrBags rr) `shouldBe` Just []
+
+    it "last update wins: a second reroute replaces the first" $ do
+      (said, panics, rr) <- runMain $ unlines $
+        preamble "noisy" "_v2" ++
+        [ "(Bytes, Sfx) : import Mod Sfx []"
+        , "(Imported, Mod, \"_v2\") :"
+        , "  [reroute Error_v2 Sink1; reroute Error_v2 Sink2; (Routed,)]"
+        , "(Routed,) : (Boom_v2, Go)"
+        , "Sink2 { (Error_v2, c!) : exit 0 }"
+        ]
+      said `shouldBe` []
+      panics `shouldBe` []
+      rrExit rr `shouldBe` ExitSuccess
+      -- Sink1 never received anything: the second reroute replaced
+      -- the first before the error fired. Sink2 exists and its
+      -- collector consumed the tuple (exit 0, no panics — the routing
+      -- demonstrably went through Sink2).
+      Map.lookup "Sink1" (rrBags rr) `shouldBe` Nothing
+      Map.lookup "Sink2" (rrBags rr) `shouldBe` Just []
+      Map.lookup "Error_v2" (rrBags rr) `shouldBe` Just []
+
+    it "a module reroutes its own errors from within (mangled args)" $ do
+      -- The module writes `reroute Error Tmp` (pre-mangle); both args
+      -- mangle, so the install is Error_v2 → Tmp_v2 — the module
+      -- reroutes its OWN module-wide error stream to one of its own
+      -- bags. It cannot name the real top-level Error: its written
+      -- `Error` is its own mangled bag (consistent with the
+      -- no-Global-exemption story, §13.13).
+      (said, panics, rr) <- runMain $ unlines $
+        preamble "selfroute" "_v2" ++
+        [ "(Bytes, Sfx) : import Mod Sfx []"
+        -- Join both witnesses: the import completion AND the module's
+        -- (Ready_v2,) — out'd by the module's one-shot in the same
+        -- transaction as its reroute write, so when this fires the
+        -- reroute is certainly installed. No startup race.
+        , "(Imported, Mod, \"_v2\"), (Ready_v2,) : (Boom_v2, Reply)"
+        , "Reply { (Caught_v2, msg) : [say \"caught %s\" msg; exit 0] }"
+        ]
+      said `shouldBe` ["caught bad"]
+      panics `shouldBe` []
+      rrExit rr `shouldBe` ExitSuccess
+      -- The tuple went through Tmp_v2 (the module's own reroute
+      -- target): its handler consumed it. Without the reroute the
+      -- §6.4 default on Error_v2 would have panicked instead.
+      Map.lookup "Tmp_v2" (rrBags rr) `shouldBe` Just []
+      Map.lookup "Error_v2" (rrBags rr) `shouldBe` Just []

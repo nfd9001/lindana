@@ -227,6 +227,84 @@ spec = do
       Map.lookup "Error" (rrBags r) `shouldBe`
         Just [VTuple [VAtom "Error", VAtom "Bad", VInt 7]]
 
+  -- §13.14 (issue #17): the error-reroute effect. `reroute Src Tgt`
+  -- installs Src → Tgt in the RTS table (in-transaction, last update
+  -- wins); the error verb consults it — bag-specific key first, then
+  -- the machine's module's mangled Error bag ("all bags in the
+  -- module"; at top level that key IS the plain Error bag), then the
+  -- default. The tag stays the original mangled Error bag: stable
+  -- provenance, independent of the delivery bag.
+  describe "error reroute (§13.14, issue #17)" $ do
+    it "reroutes a bag's errors into the target (target created on demand)" $ do
+      -- The target need not exist when the reroute commits: Sink has
+      -- no machines and no initial tuples — bagForSTM creates it as a
+      -- machineless accumulator (§6.2), and the tuple sits there.
+      -- Boomer is gated on (Routed,) so the reroute is certainly
+      -- installed before the error fires (both commit in the router's
+      -- one transaction).
+      let router = MachineDef "Router" "" (take1 (p1 "Go"))
+            [ Reroute (EAtom "W") (EAtom "Sink")
+            , Lob (EAtom "W") (t [EAtom "Routed"]), Die ]
+          boomer = MachineDef "W" "" (take1 (p1 "Routed"))
+            [ Raise (t [EAtom "Bad", int 7]), Die ]
+      r <- runLoaded defaultHooks [router, boomer]
+             (Map.fromList [("Router", [t [EAtom "Go"]])])
+      Map.lookup "Sink" (rrBags r) `shouldBe`
+        Just [VTuple [VAtom "Error", VAtom "Bad", VInt 7]]
+      -- The default Error bag was never even created: the tuple went
+      -- straight to the reroute target.
+      Map.lookup "Error" (rrBags r) `shouldBe` Nothing
+    it "module-wide: rerouting the mangled Error bag catches all the module's bags" $
+      do
+      -- "All bags in the module" (issue #17): a module machine's
+      -- errors land in Error ++ machSfx before any reroute, so
+      -- rerouting that name catches machines from /any/ of the
+      -- module's bags. The tag stays Error_v2 (provenance).
+      let router = MachineDef "Router" "" (take1 (p1 "Go"))
+            [ Reroute (EAtom "Error_v2") (EAtom "Sink")
+            , Lob (EAtom "W_v2") (t [EAtom "Routed"]), Die ]
+          boomer = MachineDef "W_v2" "_v2" (take1 (p1 "Routed"))
+            [ Raise (t [EAtom "Bad", int 7]), Die ]
+      r <- runLoaded defaultHooks [router, boomer]
+             (Map.fromList [("Router", [t [EAtom "Go"]])])
+      Map.lookup "Sink" (rrBags r) `shouldBe`
+        Just [VTuple [VAtom "Error_v2", VAtom "Bad", VInt 7]]
+      Map.lookup "Error_v2" (rrBags r) `shouldBe` Nothing
+    it "top-level-wide: reroute Error Log catches every top-level machine" $
+      do
+      -- At top level (machSfx == "") the module-wide key IS the plain
+      -- Error bag, so `reroute Error Log` is "all bags in the (top-
+      -- level) module": boomer lives in bag W, not Error, and is
+      -- still caught.
+      let router = MachineDef "Router" "" (take1 (p1 "Go"))
+            [ Reroute (EAtom "Error") (EAtom "Log")
+            , Lob (EAtom "W") (t [EAtom "Routed"]), Die ]
+          boomer = MachineDef "W" "" (take1 (p1 "Routed"))
+            [ Raise (t [EAtom "Bad", int 7]), Die ]
+      r <- runLoaded defaultHooks [router, boomer]
+             (Map.fromList [("Router", [t [EAtom "Go"]])])
+      Map.lookup "Log" (rrBags r) `shouldBe`
+        Just [VTuple [VAtom "Error", VAtom "Bad", VInt 7]]
+      Map.lookup "Error" (rrBags r) `shouldBe` Nothing
+    it "last update wins: a second reroute replaces the first" $
+      do
+      -- Both reroutes commit in one transaction, sequentially — the
+      -- second insert wins, deterministically. Concurrent reroutes
+      -- from different machines would race instead (STM commit
+      -- order), which is the same "last committer wins" chaos as any
+      -- racing match (§3.1) — documented, not guarded.
+      let router = MachineDef "Router" "" (take1 (p1 "Go"))
+            [ Reroute (EAtom "W") (EAtom "Sink1")
+            , Reroute (EAtom "W") (EAtom "Sink2")
+            , Lob (EAtom "W") (t [EAtom "Routed"]), Die ]
+          boomer = MachineDef "W" "" (take1 (p1 "Routed"))
+            [ Raise (t [EAtom "Bad", int 7]), Die ]
+      r <- runLoaded defaultHooks [router, boomer]
+             (Map.fromList [("Router", [t [EAtom "Go"]])])
+      Map.lookup "Sink2" (rrBags r) `shouldBe`
+        Just [VTuple [VAtom "Error", VAtom "Bad", VInt 7]]
+      Map.lookup "Sink1" (rrBags r) `shouldBe` Nothing
+
   describe "named bags (§6)" $ do
     it "a machine only matches the bag whose block declared it" $ do
       -- (Work,) lands in bag W, not Global: the Global machine never

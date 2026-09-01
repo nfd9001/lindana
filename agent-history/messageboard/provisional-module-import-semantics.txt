@@ -1,0 +1,80 @@
+PROVISIONAL DECISIONS — module import semantics (handover §13.13)
+==================================================================
+
+Status:   PROVISIONAL — the "flip-worthy pile" recorded in PR #19's
+          summary (branch runtime/modules, issue #17 part 1).
+          Each item is independently flippable; do not treat any of
+          them as final until a real grammar/semantics pass ratifies
+          them. Written down here so the pile doesn't have to be
+          re-derived from the PR body.
+
+1. NO Global EXEMPTION — reply-as-data (the big one)
+   -------------------------------------------------
+   Decision: a module's atom mentions are ALL mangled — including
+   `Global` and `Error`. A module therefore cannot name the real
+   front door or the real Error bag; it replies into whatever bag its
+   caller passes AS DATA (the §13.13 `lob`-target expression
+   extension: `lob reply (...)` with reply a variable), and its
+   `error` calls route at runtime to its mangled Error bag.
+
+   Why: §4's continuation philosophy (the caller shapes what happens
+   next) and §12's no-special-cases rule. The obvious alternative —
+   exempting `Global` — would give every module a hidden channel to
+   the program's front door, which is exactly the coupling the suffix
+   namespace exists to prevent.
+
+   To flip: add "Global"/"Error" to the exemption list in
+   Lindana.Import.mangleExpr (alongside `Nil`), revert the `lob`
+   target to a plain Name if desired, and amend §13.13 + the Import
+   module header. Tests: ModuleSpec's reply-as-data cases and the
+   mangled-error routings would need updating.
+
+2. RAW-CONCATENATION SUFFIX
+   ------------------------
+   Decision: the suffix is appended to atoms with NO separator — the
+   caller writes it: `"_v2"`, not `"v2"`. `Worker` + `_v2` =
+   `Worker_v2`; `Worker` + `v2` = `Workerv2`.
+
+   Why: keeps the mangler dumb (no vocabulary of "where does a
+   separator belong"), and lets the caller choose the convention.
+   Hazard: suffixes that start with an identifier char make
+   `Foo` + `v2` read as one word — purely cosmetic, but confusing.
+
+   To flip: insert a separator in mangleExpr/manglePat/mangleAction
+   (one place each); update the fixtures and the §13.13/§13.14 docs.
+
+3. MODULE-NAME HANDLES ARE NEVER SUFFIXED
+   ---------------------------------------
+   Decision: the import effect reads the module-search name from the
+   bytestring side-table at effect time and looks up
+   `<moddir>/<name>.lind` with those contents VERBATIM — the ambient
+   suffix is never appended to the file name. (The name/suffix
+   handle ATOMS in the module's own source do mangle, like any
+   mention — it is the side-table CONTENTS that are exempt, because
+   suffixed files don't exist on disk.)
+
+   Why: the suffix namespaces atoms, not files; the search name is
+   runtime data with a meaning independent of the namespace.
+
+   To flip: append the effective suffix in importOnce's file lookup
+   ("suffixed file variants") and document the on-disk convention.
+
+4. FIRST-IMPORT-WINS SINGLETONS
+   -----------------------------
+   Decision: `rtsMods` registers (name, effective suffix) pairs; a
+   repeat import skips the load entirely (no re-mangle, no re-spawn)
+   but still emits the (Imported, H, suffix) completion tuple. A
+   later import's hide list on an already-loaded pair is a SILENT
+   NO-OP — first import wins.
+
+   Why: singletons also terminate self- and mutual-import cycles for
+   free, and re-hiding a loaded module would require unloading
+   machinery nobody has asked for.
+
+   To flip: make the registry value the hide list (or a full
+   MachineDef set) and reload-on-different-args; amend §13.13 and
+   ModuleSpec's singleton test.
+
+Full context: lindana-handover.md §13.13; PR #19's "flip-worthy
+pile" bullet; src/Lindana/Import.hs module header (which records 1–3
+in code).

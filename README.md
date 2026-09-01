@@ -48,7 +48,10 @@ Git history might be a better source-of-truth about recent progress until I've e
   cross-bag atomicity for free. Also owns the §13.13 `import`
   effect: spawns module machines mid-run, keeps the module registry
   (singleton per name + suffix), and emits the `(Imported, H, suffix)`
-  completion gate.
+  completion gate — and the §13.14 error-reroute table (`rtsReroute`):
+  `reroute Src Tgt` repoints the `error` verb, bag-specific keys
+  taking precedence over a module's mangled Error bag ("all bags in
+  the module").
 - `src/Lindana/Loader.hs` — the program loader: lowers a parsed
   `Program` into bag-tagged machines + per-bag initial tuples,
   enforces the §6 declaration rules, and installs the §6.4 default
@@ -66,7 +69,10 @@ Git history might be a better source-of-truth about recent progress until I've e
   `bytes.lind` (§9) binds bytestring handles and
   contrasts `bytesEqual` with `==`; `imports.lind` + `greeter.lind`
   (§13.13) load a module at runtime with a namespace suffix and
-  gate on the `(Imported, …)` completion tuple; `brainfuck.lind`
+  gate on the `(Imported, …)` completion tuple; `reroute.lind` +
+  `flaky.lind` (§13.14) import a failing module and reroute its whole
+  error stream into a collector (last update wins, tag-as-provenance);
+  `brainfuck.lind`
   (§13.12) is a Brainfuck interpreter — zipper program and tape,
   jump-table brackets, CPS reversal via `!` splice — that runs the
   classic Hello World!; `throttle.lind` (§8.2) is a
@@ -118,12 +124,16 @@ initial-bag blocks, named bag blocks, the §9 bytestring side-table
 (opaque atom handles; `==` is pure atom identity, `bytesEqual`
 compares contents; binds emit a `(Bytes, H)` completion tuple;
 `bytesRead` decodes a handle back into the codepoint list — a string
-in and out of ByteString is the identity, §9/issue #12), and module
+in and out of ByteString is the identity, §9/issue #12), module
 import (§13.13, issue #17, provisional: `import H S Hide` loads
 `<name>.lind` at runtime from bytestring handles, suffix-mangles its
 atoms — a namespace — and spawns its machines mid-run; hide lists
 skip bags; `Nil → ""` is preregistered so the empty suffix is free;
-`lob`'s target may be a variable: bag names as data).
+`lob`'s target may be a variable: bag names as data), and error
+rerouting (§13.14, issue #17, provisional: `reroute Src Tgt` repoints
+the `error` verb — a specific bag's errors, or a whole module's when
+`Src` is its mangled Error bag; last update wins; the tuple's tag
+stays the original mangled Error bag — provenance).
 Effect bundles need no syntax (§11.6, provisionally resolved): a
 reaction's post-commit action list *is* the bundle.
 

@@ -1,0 +1,14 @@
+-- selfroute: a module that reroutes its OWN error stream from within
+-- (§13.14). It writes `reroute Error Tmp` — both arguments mangle
+-- (§13.13), so the install is Error_v2 → Tmp_v2: the module-wide
+-- reroute of its own error stream to one of its own bags (its written
+-- `Error` IS its own mangled error bag — it cannot name the real
+-- top-level Error, consistent with the no-Global-exemption story).
+-- Its own Tmp handler block (mangled like everything else) catches
+-- the rerouted tuples there, keyed on the tag Error_v2 — the tag
+-- stays the original mangled Error bag: stable provenance (§13.14).
+: [reroute Error Tmp; (Ready,)]
+
+(Boom, reply) : error ("bad", reply)
+
+Tmp { (Error, msg, reply) : lob reply (Caught, msg) }

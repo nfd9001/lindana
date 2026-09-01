@@ -261,6 +261,28 @@ main = hspec $ do
             [Import (EAtom "InnerMod_r") (EAtom "Nil") (ETuple [EAtom "Boot", EAtom "Nil"])
             , Out (ETuple [EAtom "Go_r", str "hi"])]]
 
+    -- §13.14 (issue #17): the error-reroute action — both arguments
+    -- are bag names (atoms, or variables holding bag names as data);
+    -- both mangle, so a module can only reroute its own bags.
+    describe "reroute action (§13.14, issue #17)" $ do
+      it "parses reroute with two bag-name arguments" $ do
+        p <- parseOk ": reroute Error Log"
+        progDecls p `shouldBe`
+          [Machine [] [Reroute (EAtom "Error") (EAtom "Log")]]
+      it "accepts variables (bag names as data, the §13.13 lob-target extension)" $ do
+        p <- parseOk "(s,) : reroute s Log"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PVar "s"])]
+                   [Reroute (EVar "s") (EAtom "Log")]]
+      it "reserves reroute (no variable named reroute)" $
+        isLeft (parseProgram "(reroute,) : die")
+      it "round-trips" $
+        roundTrips ": [reroute Error Log; reroute W_v2 Sink]" `shouldBe` True
+      it "mangles both arguments (a module can only reroute its own bags)" $ do
+        p <- parseOk ": reroute Error Log"
+        progDecls (mangleProgram "_v2" p) `shouldBe`
+          [Machine [] [Reroute (EAtom "Error_v2") (EAtom "Log_v2")]]
+
     it "parses a no-LHS machine (§1 one-shot): the issue #7 Hello World" $ do
       p <- parseOk $ T.unlines
         [ ": [say \"Hello world!\"; (Stop, 0)]"

@@ -77,7 +77,7 @@ reservedWords = Set.fromList
   , "lob", "error", "panic"
   , "rand", "typeOf", "atomize", "atos"
   , "bytesBind", "bytesDestroy", "bytesEqual", "bytesRead"
-  , "import"
+  , "import", "reroute"
   ]
 
 -- | Whitespace consumer. At depth 0: spaces, tabs, CRs and @--@ line
@@ -429,6 +429,7 @@ actionP :: Parser Action
 actionP = choice
   [ ifP
   , lobP
+  , rerouteP
   , bytesBindP
   , bytesDestroyP
   , importP
@@ -441,6 +442,14 @@ actionP = choice
   , rword "quit" *> pure Die
   , Out <$> tupleExpr
   ]
+
+-- | A bag name in action position: usually a capitalized atom as
+-- written, but a lowercase variable is legal — the bag name travels
+-- as data (issue #17, §13.13: modules reply into caller-named bags,
+-- since their own mentions of @Global@ are mangled away). Shared by
+-- @lob@'s target and @reroute@'s source and target.
+bagTarget :: Parser Expr
+bagTarget = (EAtom <$> atomIdent) <|> (EVar <$> varIdent)
 
 ifP :: Parser Action
 ifP = do
@@ -457,8 +466,14 @@ lobP :: Parser Action
 -- is legal: the bag name as data (issue #17, §13.13 — modules reply
 -- into caller-named bags).
 lobP = rword "lob" *> (Lob <$> bagTarget <*> tupleExpr)
-  where
-    bagTarget = (EAtom <$> atomIdent) <|> (EVar <$> varIdent)
+
+-- | Issue #17 (§13.14): @reroute Src Tgt@ — both arguments are bag
+-- names (atoms, or variables holding bag names as data): errors raised
+-- by machines declared in bag @Src@ land in bag @Tgt@ instead of the
+-- Error bag. @Tgt@ may also be a module's mangled Error bag, which
+-- stands for "all bags in the module" (§13.14).
+rerouteP :: Parser Action
+rerouteP = rword "reroute" *> (Reroute <$> bagTarget <*> bagTarget)
 
 sayP :: Parser Action
 sayP = do

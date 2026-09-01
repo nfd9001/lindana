@@ -1,0 +1,82 @@
+PROVISIONAL DECISIONS — error-reroute semantics (handover §13.14)
+==================================================================
+
+Status:   PROVISIONAL — decisions made during the error-reroute slice
+          (branch runtime/error-reroute, issue #17 part 2, PR #19's
+          first "Next" item). Flip-worthy per the house style; none
+          is final until a real semantics pass ratifies it.
+
+1. THE MODULE-WIDE KEY IS THE MANGLED ERROR BAG NAME
+   --------------------------------------------------
+   Decision: `reroute Src Tgt` — the table maps bag names to target
+   bags, and a MODULE's error stream is addressed by its mangled
+   Error bag (`Error ++ suffix`), because every machine the module
+   spawned has its errors land there before any reroute. At top
+   level (suffix "") that key IS the plain Error bag, so
+   `reroute Error Log` is "all top-level errors".
+
+   Why this spelling: the alternative — keying on the ambient
+   suffix — is not even spellable as an atom (a suffix like `_v2`
+   starts lowercase; atomize would mangle it), while `Error_v2` is
+   an ordinary atom mention that the mangler already handles
+   consistently. The Error-bag name already identifies the module's
+   error stream.
+
+   Hazard (documented, not guarded): a top-level bag literally named
+   `Error_v2` is caught by module-v2's module-wide reroutes too —
+   bag-specific keys win first, then the module key. Deterministic,
+   accursed, on brand (§12).
+
+   To flip: change errorTargetSTM's second lookup (Lindana.Machine);
+   amend §13.14 and ModuleSpec/MachineSpec's module-wide cases.
+
+2. IN-TRANSACTION INSTALL (NOT A DEFERRED EFFECT)
+   -----------------------------------------------
+   Decision: `reroute` writes the table in the matching transaction
+   (like lob's bag writes), not as a queued effect for the FIFO
+   runner.
+
+   Why: the install commits atomically with the rerouting machine's
+   match — no error can be routed by a half-installed reroute, and a
+   one-shot emits its witness tuple in the same transaction (tests
+   gate on this for race-free ordering). "Last update wins" within
+   one action list is strictly ordered; across machines it is an STM
+   commit race — last committer wins, §3.1 chaos, documented.
+
+   The alternative — a deferred effect — would give a global total
+   order on reroutes (the runner is FIFO) at the cost of the
+   commit/run gap: an error could fire between the reroute's commit
+   and its run. Flip if deterministic global ordering of competing
+   reroutes ever matters more than install-atomicity.
+
+3. TAG = PROVENANCE (NOT THE DELIVERY BAG)
+   ----------------------------------------
+   Decision: a rerouted error tuple's leading atom stays the
+   ORIGINAL mangled Error bag (Error, Error_v2, …) regardless of
+   where it is delivered.
+
+   Why: the tag answers "where is this error FROM" (which module's
+   stream), not "where did it land" (the bag says that). Collector
+   patterns key on the tag and survive reroute changes; two
+   collectors receiving the same error see the same shape. The
+   alternative (tag = target bag) would make tuple shape depend on
+   the current reroute state — churn, not information.
+
+   To flip: one line in interpretActions' Raise case
+   (errorTuple tgt … instead of errorTuple (errorBag ++ sfx) …);
+   update the collector-pattern tests.
+
+4. PANIC IS NEVER REROUTED
+   ------------------------
+   Decision: `reroute` repoints only the `error` verb. `panic` stays
+   fatal (panic hook + exit 1) with no table consulted.
+
+   Why: panic is not a message, it is program termination (§6.4);
+   rerouting it would mean "make fatal errors non-fatal", which is a
+   different (and much scarier) feature.
+
+   To flip: consult the table in the Panic case; decide what "caught
+   panic" even means first.
+
+Full context: lindana-handover.md §13.14 (and §6.4's reroute bullet);
+src/Lindana/Machine.hs (errorTargetSTM + the Raise/Reroute cases).

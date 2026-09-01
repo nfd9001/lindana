@@ -1,0 +1,42 @@
+-- Error reroute (issue #17, §13.14): reroute Src Tgt repoints error
+-- calls — errors raised by machines declared in bag Src land in Tgt.
+-- Naming a module's mangled Error bag (Error ++ suffix) stands for
+-- "all bags in the module": every machine the module spawned has its
+-- errors land there before any reroute, so rerouting that one name
+-- catches the module's whole error stream. Last update wins: a later
+-- reroute of the same source replaces the earlier one. The error
+-- tuple's leading atom stays the module's mangled Error bag (here
+-- Error_v2) — stable provenance, independent of where the tuple is
+-- delivered, so collectors match on the tag, not their own bag name.
+
+-- Bind the module name and suffix as bytestrings (§13.13 import
+-- machinery; the (Bytes, H) completions gate the import).
+: bytesBind Flaky "flaky"
+: bytesBind Suffix "_v2"
+
+{ (Start,) }
+
+(Bytes, Flaky), (Bytes, Suffix), (Start,) : import Flaky Suffix []
+
+-- Two reroutes of the same source, committed in one transaction:
+-- Collector is written first, Archive second — Archive wins (last
+-- update wins). The (Routed,) witness outs in the same transaction,
+-- so the trigger below cannot race the install.
+(Imported, Flaky, "_v2") :
+  [reroute Error_v2 Collector; reroute Error_v2 Archive; (Routed,)]
+
+-- Trigger the module (bare module machines match Global, like ours).
+(Routed,) : (Work_v2, Inbox)
+
+-- The module's error tuple (Error_v2, "boom", Inbox) lands HERE —
+-- not on its mangled Error bag (where the fatal §6.4 default would
+-- have panicked the run), and not in Collector.
+Archive {
+  (Error_v2, "boom", who) :
+    [say "archived a flaky error from %a" who; exit 0]
+}
+
+-- Declared but never fired: the second reroute replaced the first.
+Collector {
+  (Error_v2, c!) : say "collector saw something?!"
+}

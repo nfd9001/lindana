@@ -1,0 +1,5 @@
+-- flaky: a module whose work fails — its error calls route to its own
+-- mangled Error bag (Error ++ suffix, §13.13) and, since it declares
+-- no Error block, land on the §6.4 default machine there (fatal
+-- panic) — unless the importer reroutes them (§13.14).
+(Work, reply) : [lob reply (Started,); error ("boom", reply)]
