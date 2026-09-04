@@ -44,6 +44,18 @@
 --     silently the way it does on a @say@ format error (§13.12's
 --     debugging tale).
 --
+--   * Error rerouting (issue #17, §13.14): @reroute Src Tgt@ writes
+--     into 'rtsReroute', and the @error@ verb consults the table —
+--     errors raised by machines declared in bag @Src@ land in @Tgt@
+--     instead of the Error bag. A module-wide reroute is spelled by
+--     naming the module's mangled Error bag (@Error ++ suffix@), which
+--     stands for "all bags in the module" (all of a module's machines'
+--     errors land there before any reroute, so rerouting that name
+--     catches them all). Bag-specific keys take precedence over
+--     module-wide keys. The table is global — any machine can reroute
+--     any other bag's error stream, which is exactly as Accursed as it
+--     sounds (documented hazard, not guarded; §12).
+--
 -- §11.6 (effect-bundle grammar) is provisionally resolved here as a
 -- decision note rather than syntax: the bundle /is/ a machine
 -- reaction's post-commit action list — the 'Effect' list this
@@ -177,6 +189,14 @@ data RTS = RTS
   , rtsExtra :: TVar [Async ()]       -- ^ §13.13 machine threads spawned
                                       --   by @import@ mid-run, cancelled
                                       --   at shutdown like the startup ones
+  , rtsReroute :: TVar (Map Name Name)  -- ^ §13.14 error-reroute table:
+                                      --   source bag name (or a module's
+                                      --   mangled Error bag, standing for
+                                      --   "all bags in the module") →
+                                      --   target bag name. Written by
+                                      --   @reroute Src Tgt@ (last update
+                                      --   wins: plain 'Map.insert'), read
+                                      --   by the @error@ verb's routing.
   , rtsHooks :: Hooks
   }
 
@@ -222,10 +242,12 @@ newRTSWith hooks = atomically $ do
   bytes <- newTVar (Map.singleton "Nil" (encodeUtf8 (T.pack "")))
   mods  <- newTVar Map.empty
   extra <- newTVar []
+  reroute <- newTVar Map.empty
   pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
            , rtsLive = live, rtsExit = exit, rtsStop = stop
            , rtsBags = bags, rtsBytes = bytes
-           , rtsMods = mods, rtsExtra = extra, rtsHooks = hooks
+           , rtsMods = mods, rtsExtra = extra
+           , rtsReroute = reroute, rtsHooks = hooks
            }
 
 -- | Resolve a bag name to its 'RBag' (§6). @Global@ is the main bag;
@@ -397,15 +419,17 @@ typeTag VTuple{}  = "Tuple"
 -- emission — within a bag it is Linda semantics, and the continuation
 -- idiom (@(c!, a + b)@) only works if the continuation lands where
 -- the matching machines are. Cross-bag traffic goes through @lob@
--- exclusively (§6.1).
+-- exclusively (§6.1). The @bagName@ argument is that bag's name —
+-- the @error@ verb's reroute lookup (§13.14) keys on it.
 --
 -- The @sfx@ argument is the machine's ambient namespace suffix
 -- (§13.13, 'Lindana.Def.MachineDef'’s @machSfx@): @error@ routes to
 -- @Error ++ sfx@ — the runtime equivalent of suffix-mangling that
 -- atom in an imported module's source — and @import@ propagates the
 -- ambient suffix to everything the import loads.
-interpretActions :: RTS -> RBag -> String -> Env -> [Action] -> STM ([Effect], Bool)
-interpretActions rts bag sfx env = go []
+interpretActions :: RTS -> RBag -> String -> Name -> Env -> [Action]
+                -> STM ([Effect], Bool)
+interpretActions rts bag sfx bagName env = go []
   where
     go acc [] = pure (reverse acc, True)
     go acc (act : rest) = case act of
@@ -413,13 +437,13 @@ interpretActions rts bag sfx env = go []
         t <- evalR rts env e
         outSTM bag t
         go acc rest
-      Lob bagNameE e -> do
-        n <- evalR rts env bagNameE
-        bagName <- case n of
+      Lob tgtE e -> do
+        n <- evalR rts env tgtE
+        tgt <- case n of
           VAtom bn -> pure bn
           _ -> error "lob: target must be an atom (a bag name, §6.1)"
         t <- evalR rts env e
-        lobSTM rts bagName t
+        lobSTM rts tgt t
         go acc rest
       Say f es -> do
         vs <- mapM (evalR rts env) es
@@ -436,10 +460,17 @@ interpretActions rts bag sfx env = go []
         pure (reverse (EffPanic v : acc), False)
       Raise e -> do
         t <- evalR rts env e
-        -- §13.13: a module's error verb routes to its own mangled
-        -- Error bag (Error ++ ambient suffix); at top level sfx is
-        -- "" and this is the plain Error bag (§6.4).
-        ebag <- bagForSTM rts (errorBag ++ sfx)
+        -- §13.13 + §13.14: the tuple goes to the machine's mangled
+        -- Error bag (Error ++ ambient suffix — the plain Error bag at
+        -- top level, §6.4), after consulting the reroute table (bag-
+        -- specific first, then module-wide; see 'errorTargetSTM').
+        -- The tag stays the ORIGINAL mangled Error bag: provenance —
+        -- "an error from this machine's module" — travels with the
+        -- tuple and is stable no matter where a reroute delivers it,
+        -- so a collector can match (Error, rest!) / (Error_v2, rest!)
+        -- without caring which bag it lives on.
+        tgt <- errorTargetSTM rts bagName sfx
+        ebag <- bagForSTM rts tgt
         outSTM ebag (errorTuple (errorBag ++ sfx) t)
         go acc rest
       BytesBind h e -> do
@@ -464,6 +495,20 @@ interpretActions rts bag sfx env = go []
         hv  <- evalR rts env hide
         hs <- atomList hv
         go (EffImport (atomHandle nhv) (atomHandle shv) hs sfx : acc) rest
+      Reroute srcE tgtE -> do
+        -- §13.14: write the reroute table now, in-transaction — the
+        -- write commits atomically with the match that performed it,
+        -- so no error can be routed by a half-installed reroute (last
+        -- update wins on purpose, issue #17). Targets are NOT checked
+        -- to exist: an unknown target is an §6.2 machineless
+        -- accumulator (or a future module's bag) — that is the
+        -- Accursed point (documented hazard, not guarded; §12).
+        sv <- evalR rts env srcE
+        tv <- evalR rts env tgtE
+        src <- atomName sv
+        tgt <- atomName tv
+        modifyTVar' (rtsReroute rts) (Map.insert src tgt)
+        go acc rest
       If c th el -> do
         b <- truthy <$> evalR rts env c
         go acc ((if b then th else el) ++ rest)
@@ -491,6 +536,16 @@ atomHandle (VAtom n) = n
 atomHandle _ =
   error "import: name and suffix must be bytestring handles (atoms, §13.13)"
 
+-- | §13.14: @reroute@'s source and target must be atoms (bag names —
+-- the parser also accepts variables holding bag names as data, the
+-- §13.13 @lob@-target extension). Anything else is the provisional
+-- Haskell-level error, same routing as the other action-layer checks
+-- (§3.3).
+atomName :: Val -> STM Name
+atomName (VAtom n) = pure n
+atomName _ =
+  error "reroute: source and target must be bag names (atoms, §13.14)"
+
 -- | §13.13: the hide list is a cons-list of atoms (the §11.5 list
 -- literal shape, or @[]@) naming module bags whose machines are not
 -- imported ('Lindana.Import.hideBags' matches pre-mangle names).
@@ -502,15 +557,59 @@ atomList (VTuple _) =
 atomList _ =
   error "import: hide list must be a cons-list of atoms (§13.13)"
 
+-- | The @error@ verb's routing decision (§6.4 + §13.14). @bag@ is the
+-- machine's own bag; @sfx@ its module's ambient suffix.
+--
+-- The routing, in precedence order:
+--
+--   1. /Bag-specific reroute/ (§13.14): @rtsReroute@ keyed by the
+--      machine's own bag name.
+--   2. /Module-wide reroute/ (§13.14): @rtsReroute@ keyed by the
+--      machine's module's mangled Error bag (@'errorBag' ++ sfx@) —
+--      the reroute action's spelling for "all bags in the module":
+--      every module machine's errors land there before any reroute,
+--      so rerouting that name catches them all. At top level
+--      (@sfx == ""@) this key /is/ the default Error bag, so a plain
+--      @reroute Error Log@ reroutes every top-level machine's errors.
+--   3. /The bag the tuple actually goes to/ — the default: the
+--      machine's mangled Error bag (@'errorBag' ++ sfx@, the plain
+--      Error bag at top level). A module's own @Error { … }@ handler
+--      block, mangled like everything else, catches its own errors
+--      here.
+--
+-- Resolving through 'bagForSTM' at routing time means a reroute table
+-- written /before/ the target bag exists is honored — the §6.2
+-- accumulator semantics: rerouting to a bag whose machines have not
+-- been declared or imported yet just accumulates there until they
+-- start matching (issue #17's "for Accursedness, all you need is the
+-- source and target bucket").
+errorTargetSTM :: RTS -> Name -> String -> STM Name
+errorTargetSTM rts bag sfx = do
+  rr <- readTVar (rtsReroute rts)
+  let mangled = errorBag ++ sfx
+  pure $ case Map.lookup bag rr of
+    Just tgt -> tgt               -- 1. bag-specific reroute wins
+    Nothing -> case Map.lookup mangled rr of
+      Just tgt  -> tgt            -- 2. module-wide reroute: at top
+                                  --    level (sfx == "") this key IS
+                                  --    the default, so a plain
+                                  --    @reroute Error Log@ catches
+                                  --    every top-level machine's
+                                  --    errors — "all bags in the
+                                  --    module", issue #17
+      Nothing   -> mangled        -- 3. the machine's mangled Error bag
+
 -- | @error e@ (§6.4): an @(Error, …)@ tuple into the named @Error@
 -- bag (conceptually sugar over @lob Error …@); a tuple argument's
 -- contents are spliced in. With no user @Error@ declarations the
 -- loader installs the default machine @(c!) : panic c@; an empty
 -- user @Error { }@ block means "silently swallow all errors".
--- The @tag@ argument is the tuple's leading atom: @Error@ at top
--- level, @Error ++ suffix@ for an imported module's machines (§13.13)
--- — so a module's own @Error { … }@ handler block, mangled the same
--- way, matches its own error tuples; the tag travels with the bag.
+-- The @tag@ argument is the tuple's leading atom: the machine's
+-- mangled Error bag name — @Error@ at top level, @Error ++ suffix@
+-- for an imported module's machines (§13.13) — so a module's own
+-- @Error { … }@ handler block, mangled the same way, matches its own
+-- error tuples, and the tag is stable provenance even when a reroute
+-- (§13.14) delivers the tuple somewhere else.
 errorTuple :: Name -> Val -> Val
 errorTuple tag v = VTuple (VAtom tag : case v of
   VTuple vs -> vs
@@ -541,7 +640,8 @@ machineThread rts bag m = go `finally` decLive
     go
       | null (machJoin m) = do   -- §1: one-shot, unconditionally, at start
           (effs, _) <- atomically
-            (interpretActions rts bag (machSfx m) Map.empty (machBody m))
+            (interpretActions rts bag (machSfx m) (machBag m) Map.empty
+                              (machBody m))
           push effs
           pure ()                -- implicitly terminates after firing
       | otherwise = loop
@@ -557,7 +657,8 @@ machineThread rts bag m = go `finally` decLive
             -- transaction so its tuple-space writes land atomically
             -- with the match (the §8.2 note); irrevocables come back
             -- as a deferred bundle for the effect-runner (§7.2).
-            interpretActions rts bag (machSfx m) (matchEnv mt) (machBody m)
+            interpretActions rts bag (machSfx m) (machBag m) (matchEnv mt)
+                             (machBody m)
       push effs
       when survived loop
 

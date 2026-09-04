@@ -1,0 +1,62 @@
+FUTURE OPTION — general message reroute (the issue #17 "Accursedness" aside)
+============================================================================
+
+Status:   NOT IMPLEMENTED. Deliberately deferred during the §13.14
+          error-reroute slice (branch runtime/error-reroute).
+          Recorded here so the idea doesn't have to be rediscovered;
+          take it up only if a real program needs it.
+
+Context:  Issue #17, on the error-reroute effect: "(And for
+          Accursedness, of course, all you need is the source and
+          target bucket...)". The error-reroute table
+          (rtsReroute :: Map Name Name) is already shaped like a
+          general message interceptor — the Accursed generalization
+          is to consult it for ORDINARY traffic, not just the error
+          verb.
+
+The deferred option (as sketched in session discussion):
+
+  Extend the reroute table to intercept `out` and `lob`: a tuple
+  addressed to bag Src is delivered to bag Tgt instead (or in
+  addition? — undecided, and the fork matters):
+
+    - REDIRECT (deliver to Tgt only): a bag's whole traffic silently
+      moves. The §6.2 accumulator semantics already make unknown
+      targets legal, so "reroute to a bag that doesn't exist yet"
+      composes with future modules for free.
+    - TEE (deliver to both): a wiretap. Much more attractive for
+      collectors, much worse for reasoning (doubles consumption —
+      racing consumers get twice the chances, §3.1).
+
+  Both variants keep the same table shape (one lookup in outSTM /
+  lobSTM) and the same last-update-wins, in-transaction install.
+
+Why it was not implemented:
+
+  - Nothing needs it. The error verb was the case issue #17 actually
+    described ("reroutes error calls"); ordinary traffic rerouting
+    was the parenthetical aside.
+  - The blast radius is qualitatively larger: `out` is the
+    continuation mechanism (§4) — rerouting it moves CONTINUATIONS,
+    which can deadlock programs that were correct (a machine's
+    reply-bag is data; intercepting it breaks the reply protocol
+    between two parties neither of which asked to be
+    middle-manned).
+  - The tee variant breaks §6's single-delivery intuition and the
+    matcher's consumption accounting (two bags take the same tuple).
+
+If picked up later:
+
+  - Decide redirect vs tee FIRST (they are different features).
+  - outSTM/lobSTM in Lindana.Machine each get one table lookup; the
+    reroute action needs no syntax change (`reroute Src Tgt` already
+    spells source → target).
+  - Handover: §6.1, §6.2 and §12 all need amending; the §13.14
+    tests' collector pattern generalizes directly.
+  - Consider whether modules' mangled mentions should be exempt
+    (they were for `Nil`, not for `Global` — §13.13); a module
+    rerouting its own `out` traffic mangles consistently today.
+
+Full context: lindana-handover.md §13.14; the issue #17 quote above;
+agent-history/messageboard/provisional-error-reroute-semantics.txt
+(the error-only decisions this would generalize).

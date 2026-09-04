@@ -165,6 +165,13 @@ mangleAction sfx a = case a of
   -- (module header). The name/suffix handles are this module's own
   -- atoms: mangled, consistent with its own bytesBind of them.
   Import h s hide -> Import (mangleExpr sfx h) (mangleExpr sfx s) hide
+  -- §13.14: both reroute arguments are atom mentions of bags — mangled
+  -- like any other mention. A module can therefore only reroute its
+  -- OWN bags (its written `Error` mangles to the module's mangled
+  -- Error bag — rerouting "all bags in this module" to one of its own
+  -- bags); it cannot name the real top-level Error, consistent with
+  -- the no-Global-exemption story (module header).
+  Reroute src tgt -> Reroute (mangleExpr sfx src) (mangleExpr sfx tgt)
   Say f es       -> Say f (map (mangleExpr sfx) es)   -- format is data
   Out e          -> Out (mangleExpr sfx e)
   Exit e         -> Exit (mangleExpr sfx e)

@@ -155,6 +155,7 @@ Named bags double as the user-facing version of an internal performance fix: sha
 - `fatal` was renamed to **`panic`** for clarity.
 - `Error` has a default machine: `(c!) : panic c` — **active only if the program declares no machine(s) of its own for `Error`.** A user-declared `Error { ... }` block, even if empty, fully replaces (not merely races against) the default. Consistent with the single-declaration-site rule: the default is only ever installed when zero user declarations exist for `Error`, never coexisting with a user block.
 - **A deliberately empty `Error { }` block means "silently swallow all errors."**
+- Error calls are also *reroutable at runtime* (§13.14, provisional): `reroute Src Tgt` repoints the `error` verb — per bag, or module-wide via the module's mangled Error bag name — last update wins. The reroute changes only where the tuple is delivered; its leading atom stays the original mangled Error bag (stable provenance). `panic` is never rerouted (it is fatal, not a message).
 
 ---
 
@@ -624,3 +625,94 @@ a module). The RTS gains the import machinery.
   fresh-name generation (§9), unified error routing (§3.3/§7.3 —
   import failure is now the strongest data point: it /can't/ afford
   the runner's silent death).
+
+### 13.14 Done — error reroute (§6.4, §7, §12), branch `runtime/error-reroute` (issue #17, part 2)
+
+Takes PR #19's first "Next" item: the error-reroute effect from issue
+#17 — "reroutes `error` calls for all the machines tracking a specific
+bag or all bags in the module (last update wins)". One new action, one
+RTS table, no new module.
+
+- **Syntax (provisional, flip-worthy)**: `reroute Src Tgt` — both
+  arguments are bag names: a capitalized atom, or a lowercase variable
+  holding a bag name as data (the same §13.13 `lob`-target extension).
+  `reroute` is reserved; renders and round-trips. Both arguments
+  mangle in modules (`Lindana.Import.mangleAction`), so a module can
+  only reroute its OWN bags — its written `Error` is its own mangled
+  error bag, and it cannot name the real top-level `Error`: consistent
+  with §13.13's no-`Global`-exemption story.
+- **The table**: `rtsReroute :: TVar (Map Name Name)` in the RTS.
+  `reroute` interprets /in-transaction/ (no deferred effect — a plain
+  STM write, like `lob`'s bag writes): the install commits atomically
+  with the rerouting machine's match, so no error can be routed by a
+  half-installed reroute, and a one-shot can emit a witness tuple in
+  the same transaction that installs the reroute (the tests lean on
+  this for race-free gating). "Last update wins" is `Map.insert`;
+  reroutes from the same machine are strictly ordered; concurrent
+  reroutes from different machines race like any other STM commit —
+  the last committer wins (§3.1 chaos, documented not guarded).
+- **Routing** (`errorTargetSTM` in "Lindana.Machine"): the `error`
+  verb consults the table, in precedence order — (1) bag-specific:
+  keyed by the raising machine's own bag; (2) module-wide: keyed by
+  the machine's module's mangled Error bag (`Error ++ machSfx`) —
+  every module machine's errors land there before any reroute, so
+  rerouting that one name is "all bags in the module" (issue #17's
+  words); at top level (sfx `""`) this key IS the plain Error bag, so
+  a plain `reroute Error Log` catches every top-level machine; (3) the
+  default: the machine's mangled Error bag (§13.13's routing,
+  unchanged). Targets are NOT checked to exist — an unknown target is
+  a §6.2 machineless accumulator (or a future module's bag): the
+  Accursed point of the issue's "all you need is the source and target
+  bucket".
+- **Tag = provenance**: the tuple's leading atom stays the ORIGINAL
+  mangled Error bag (`Error`, `Error_v2`, …) no matter where a reroute
+  delivers it — a collector pattern keys on the tag ("an error from
+  this module"), never on its own bag's name, and the tuple's shape is
+  stable across reroute changes. `panic` is never rerouted (fatal, not
+  a message). A module's own `Error { … }` handler is simply bypassed
+  while its error stream is rerouted elsewhere (reroute is a runtime
+  override — last update wins includes overriding a declared handler).
+- **Provisional decisions made here (flip-worthy)**: the module-wide
+  key being the mangled Error bag name (the obvious alternative:
+  keying on the ambient suffix — but a suffix like `_v2` is not even
+  spellable as an atom, and the Error-bag name already identifies the
+  module's error stream); in-transaction install (vs a deferred
+  effect through the FIFO runner, which would give a global total
+  order on "last"); tag-as-provenance (vs tag = target bag); the
+  bag-name/module-key collision hazard — a top-level bag literally
+  named `Error ++ suffix` is caught by that module's module-wide
+  reroutes too (lookup is bag-key first; deterministic, documented,
+  not guarded). Recorded on the messageboard along with PR #19's
+  pile: `agent-history/messageboard/provisional-error-reroute-semantics.txt`.
+- **Deliberately deferred (the issue's Accursed aside)**: generalizing
+  the reroute to arbitrary message streams (intercepting `out`/`lob`
+  between buckets, not just `error`). Same table shape, much bigger
+  blast radius — recorded as a FUTURE OPTION:
+  `agent-history/messageboard/general-message-reroute-future.txt`.
+- **Tests**: 16 new — Spec: grammar (two bag-name args, variables
+  legal, reserved word, round-trip) + both args mangle; MachineSpec:
+  bag-key reroute (target created on demand as a §6.2 accumulator,
+  default Error bag never created), module-wide via `Error_v2`,
+  top-level-wide via plain `Error`, last-update-wins (two reroutes in
+  one transaction), tag = provenance in every tuple; ModuleSpec e2e
+  over `test/modules/*.lind` (+ new `selfroute.lind` fixture): top
+  level collects a module's errors (the §6.4 default on the mangled
+  bag never fires), last-update-wins across the import boundary, and
+  a module rerouting its own error stream from within — its written
+  `reroute Error Tmp` installs `Error_v2 → Tmp_v2` and its own mangled
+  `Tmp` handler catches the tuples. 150 total green, randomized
+  order, 7× repeat stable. Zero `-Wall` warnings.
+- **Examples**: `examples/reroute.lind` + `examples/flaky.lind` —
+  import a failing module, reroute its whole error stream twice
+  (second wins), collector keys on the `Error_v2` tag; verified via
+  CLI (exit 0, no panic) and `--parse` round-trip (fixed point).
+- **Remaining threads (issue #17 part 3 + carried)**: Prelude/stdlib
+  (default import, pragma-out, static-preregistering machines) — needs
+  its own design pass; for #18, the file-descriptor slice reuses the
+  §13.13 dynamic-spawn machinery, and its "sister effect" (rerouting
+  `say`'s target FD) mirrors this slice's table design. Still open in
+  §11: mixed int/double arithmetic (§11.3), effect-runner scope
+  (§11.7), `die` vs `quit` (§11.9), bytestring reclamation (§11.11),
+  fresh-name generation (§9), unified error routing (§3.3/§7.3 —
+  untouched here; the reroute repoints the *error verb's* destination
+  bag, not the Haskell-level error path).

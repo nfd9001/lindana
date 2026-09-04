@@ -141,6 +141,16 @@ data Action
                                 --   every atom in the module's source and
                                 --   to every import the module itself
                                 --   performs. See "Lindana.Import".
+  | Reroute Expr Expr           -- ^ @reroute Src Tgt@ (issue #17, §13.14) —
+                                --   reroute @error@ calls: errors raised by
+                                --   machines declared in bag @Src@ land in
+                                --   bag @Tgt@ instead of the Error bag.
+                                --   @Tgt@ may also name a /module/ — a
+                                --   module's mangled Error bag (@Error ++
+                                --   suffix@) stands for "all bags in the
+                                --   module". Both arguments must evaluate
+                                --   to atoms. Last update wins. See
+                                --   "Lindana.Machine" for the routing.
   | If Expr [Action] [Action]   -- ^ Terse @if@; branches are action sequences.
   deriving (Eq, Show)
 
@@ -193,6 +203,8 @@ renderAction (BytesBind h e) = "bytesBind " ++ h ++ " " ++ renderExpr e
 renderAction (BytesDestroy e) = "bytesDestroy " ++ renderExpr e
 renderAction (Import h s hide) =
   unwords ["import", renderExpr h, renderExpr s, renderExpr hide]
+renderAction (Reroute src tgt) =
+  unwords ["reroute", renderExpr src, renderExpr tgt]
 renderAction (If c t e)   =
   "if " ++ renderExpr c ++ " then " ++ renderActionSeq t
   ++ " else " ++ renderActionSeq e
