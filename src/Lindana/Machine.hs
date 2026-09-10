@@ -56,6 +56,17 @@
 --     any other bag's error stream, which is exactly as Accursed as it
 --     sounds (documented hazard, not guarded; §12).
 --
+--   * The Prelude (issue #17 part 3, §13.15): the RTS ships a
+--     /builtin module/ ("Lindana.Prelude") imported by default in the
+--     top-level file — the loader prepends a synthetic one-shot
+--     @: import Prelude Nil []@ ('Lindana.Loader.preludeImportMachine'),
+--     and this module's @importOnce@ resolves the name from the
+--     builtin registry (shadowing disk) before @hookModDir@. The
+--     prelude's name handle @Prelude@ is seeded in 'rtsBytes' next to
+--     @Nil → ""@; neither entry is special. One-shot preregistration
+--     machines only — a looping service in the default import would
+--     keep every program alive forever.
+--
 -- §11.6 (effect-bundle grammar) is provisionally resolved here as a
 -- decision note rather than syntax: the bundle /is/ a machine
 -- reaction's post-commit action list — the 'Effect' list this
@@ -139,7 +150,8 @@ import System.Exit (ExitCode (..))
 import System.IO (hPutStrLn, stderr)
 
 import Lindana.Def (MachineDef (..), globalBag, errorBag)
-import Lindana.Import (lowerModule, parseModuleFile)
+import Lindana.Import (lowerModule, parseModuleFile, parseModuleSource)
+import Lindana.Prelude (builtinModules, preludeName)
 import Lindana.Runtime
 import Lindana.Syntax
 
@@ -234,12 +246,16 @@ newRTSWith hooks = atomically $ do
   stop  <- newTVar False
   seed  <- newTVar (mkStdGen 12345)
   bags  <- newTVar Map.empty
-  -- §13.13: one bytestring preregistered — Nil → "". This is what
-  -- makes @import H Nil […]@ the spelling of "no suffix" (the empty
-  -- suffix is allowed but a bad idea — no namespacing). The entry is
-  -- not special: bytesBind Nil … or bytesDestroy Nil clobbers/drops
-  -- it like any handle.
-  bytes <- newTVar (Map.singleton "Nil" (encodeUtf8 (T.pack "")))
+  -- §13.13 + §13.15: two bytestrings preregistered — Nil → "" (the
+  -- free empty import suffix, §13.13) and the prelude's name handle
+  -- Prelude → "Prelude" (what the §13.15 default-import machine's
+  -- @import Prelude Nil []@ reads; @bytesBind Prelude "Prelude"@ is
+  -- the manual spelling). Neither is special: bytesBind Nil … or
+  -- bytesDestroy Prelude clobbers/drops either like any handle.
+  bytes <- newTVar (Map.fromList
+    [ ("Nil", encodeUtf8 (T.pack ""))
+    , (preludeName, encodeUtf8 (T.pack preludeName))
+    ])
   mods  <- newTVar Map.empty
   extra <- newTVar []
   reroute <- newTVar Map.empty
@@ -770,10 +786,23 @@ importOnce rts nh sh hidden sfx = do
         -- Repeat import: module singletons (first import wins —
         -- a later hide list has no effect; documented hazard).
         -- Still emit the completion tuple: consumers gate on it
-        -- regardless of whether the load was fresh.
-        then emitImported rts nh eff >> pure (Right ())
+        -- regardless of whether the load was fresh. The pending slot
+        -- claimed in-transaction must still be settled (−1) — the
+        -- §13.13 contract says "−1 on skip or failure", and a leaked
+        -- slot would make the run-alive check never fire (found by
+        -- the §13.15 prelude tests: the default import + an explicit
+        -- repeat would hang every non-exit program forever).
+        then do
+          atomically (modifyTVar' (rtsLive rts) (subtract 1))
+          emitImported rts nh eff >> pure (Right ())
         else do
-          ep <- parseModuleFile (hookModDir (rtsHooks rts)) nm
+          ep <- case Map.lookup nm builtinModules of
+            -- §13.15: builtin modules (the prelude) are parsed from
+            -- the registry, shadowing disk — the search then never
+            -- touches @hookModDir@ (a user file named Prelude.lind is
+            -- shadowed; documented, flip-worthy).
+            Just src -> pure (parseModuleSource ("builtin module " ++ nm) src)
+            Nothing  -> parseModuleFile (hookModDir (rtsHooks rts)) nm
           case ep of
             Left err   -> pure (Left err)
             Right prog -> case lowerModule hidden eff prog of

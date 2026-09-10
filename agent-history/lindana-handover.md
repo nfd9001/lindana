@@ -155,6 +155,7 @@ Named bags double as the user-facing version of an internal performance fix: sha
 - `fatal` was renamed to **`panic`** for clarity.
 - `Error` has a default machine: `(c!) : panic c` — **active only if the program declares no machine(s) of its own for `Error`.** A user-declared `Error { ... }` block, even if empty, fully replaces (not merely races against) the default. Consistent with the single-declaration-site rule: the default is only ever installed when zero user declarations exist for `Error`, never coexisting with a user block.
 - **A deliberately empty `Error { }` block means "silently swallow all errors."**
+- The **Prelude** is imported by default in the top-level file (§13.15, provisional) — prefixless, one-shot preregistration machines only, with a deliberate `Error { }` so it never adds a second §6.4 default machine to the plain `Error` bag. `{-# no-prelude #-}` opts out; an explicit `import Prelude Nil […]` after the pragma brings it back with a hide list.
 - Error calls are also *reroutable at runtime* (§13.14, provisional): `reroute Src Tgt` repoints the `error` verb — per bag, or module-wide via the module's mangled Error bag name — last update wins. The reroute changes only where the tuple is delivered; its leading atom stays the original mangled Error bag (stable provenance). `panic` is never rerouted (it is fatal, not a message).
 
 ---
@@ -716,3 +717,113 @@ RTS table, no new module.
   fresh-name generation (§9), unified error routing (§3.3/§7.3 —
   untouched here; the reroute repoints the *error verb's* destination
   bag, not the Haskell-level error path).
+
+### 13.15 Done — the Prelude (§1, §6.4, §12, §13.13), branch `runtime/prelude` (issue #17 part 3)
+
+Takes PR #21's first "Next" item — the Prelude/stdlib paragraph of
+issue #17: "a Prelude is imported by default in the top-level file,
+prefixless, including machines that preregister statics. But you can
+pragma that away, explicitly import it, and hide whatever you want."
+The design pass concluded: the prelude is a /builtin module/ — source
+embedded in the RTS, loaded through the ordinary §13.13 import
+machinery (no new effects, no new tables) — and the default import is
+loader-owned program shape, exactly the §6.4-default-Error precedent.
+New module: `src/Lindana/Prelude.hs` (a leaf: name + source + the
+builtin registry; the import machinery does all the work).
+
+- **The default import (provisional)**: `loadProgram` (top level
+  only — `loadProgramWith`, which modules drive, is untouched)
+  prepends a synthetic no-LHS one-shot `: import Prelude Nil []`
+  (`preludeImportMachine`, exported for tests). The name handle
+  `Prelude → "Prelude"` is preregistered in `rtsBytes` next to
+  `Nil → ""` — neither entry is special, both clobberable/destroyable
+  (hazard: `bytesDestroy Prelude` racing the default import machine's
+  effect would fatal the run — astronomically unlikely, documented).
+  The synthetic bare-style machine does NOT trip the §6 "bare machines
+  + explicit Global" style check (that check runs on user decls
+  first) — regression-tested.
+- **Pragma (provisional, flip-worthy)**: `{-# no-prelude #-}` — new
+  `Pragma String` Decl, top level only (the parser enforces; the
+  loader's bag walk rejects it defensively for hand-built ASTs). The
+  body is matched against the known pragmas; an unknown pragma is a
+  loud parse error, never silently ignored (a typo'd pragma must not
+  do nothing). Renders and round-trips.
+- **Prelude content — one-shot preregistration machines only** (the
+  design call of the slice): a looping service machine in the default
+  import would keep EVERY program alive forever (the §1 loop keeping
+  the run alive is the spec), so the default prelude contains only
+  §1 empty-pattern one-shots that bind statics and die. Looping
+  stdlib services belong in opt-in modules — recorded as future
+  work, not implemented here. Content (provisional, tiny):
+  `Newline → "\n"`, `Version → "0.1.0.0"` (kept in sync with
+  `lindana.cabal` by hand — documented hazard). **One bag per static**
+  — that is the hide list's granularity (`hideBags` hides bag blocks'
+  machines). A deliberate `Error { }` block: the prelude's own
+  lowering then installs no §6.4 default Error machine, and the plain
+  Error bag stays owned by the top-level program's default (or user
+  block) — without this, every program would carry two racing
+  `(c!) : panic c` machines on Error (§3.1).
+- **Customization story**: pragma out, then `import Prelude Nil […]`
+  with a hide list (e2e-tested: hide `[Version]`, keep `Newline`).
+  Without the pragma an explicit import is a harmless singleton
+  repeat — first import wins, so a hide list there is silently
+  ignored (consistent with the messageboard note; you cannot detect
+  the intent at load time because module names are runtime data).
+- **Builtins shadow disk (provisional)**: `importOnce` consults
+  `Lindana.Prelude.builtinModules` before `hookModDir` — a user file
+  named `Prelude.lind` is shadowed; the name is effectively reserved.
+  (Flip: consult disk first.) Builtins are a plain constant, not a
+  `Hooks` field — not injectable (flip-worthy; the tests exercise the
+  mechanism via the pragma and hide lists instead).
+- **Modules do not get the default** (the issue says "in the
+  top-level file"): a module that wants the prelude imports it
+  explicitly — `bytesBind SomeHandle "Prelude"` (the string literal
+  is data, unmangled) then `import SomeHandle Sfx […]`; with the
+  module's ambient suffix the prelude loads suffix-mangled
+  (`Newline_v2`, …), consistent with §13.13's mangling rules. No
+  special cases.
+- **`Nil → ""` deliberately stays in the RTS (§13.13 unchanged)**:
+  the empty-suffix spelling must work for pragma'd-out programs. Only
+  the prelude's own name handle was added. (Flip-worthy: migrate
+  `Nil → ""` into the prelude per the issue's wording — rejected here
+  because it would make the prelude load-bearing for all imports.)
+- **Found by this slice — §13.13 bug fixed: the pending-import slot
+  leaked on skip.** The documented contract is "−1 on skip or
+  failure", but the repeat-import branch never settled the slot — a
+  leaked `+1` makes the run-alive check (`live == 0`) never fire, so
+  any program that both repeats an import and terminates by
+  all-machines-done hung forever (invisible until now: the existing
+  repeat-import tests all ended in `exit`). Fixed in `importOnce`'s
+  skip branch; regression-tested with a program that relies on
+  `live == 0` (no exit path).
+- **Tests**: 10 new — Spec: pragma grammar (parse at top level,
+  after other decls, unknown pragma = parse error, bag-block pragma =
+  parse error, round-trip); LoaderSpec: the synthetic machine's shape
+  and position, pragma suppression, and five e2e runs (statics bound
+  by default, pragma + explicit import with hide list, singleton
+  repeat, the pending-slot regression, `bytesDestroy`-survivors list
+  updated for the second preregistered entry). 160 total green,
+  randomized order, 3× repeat stable, sub-second suite. Zero `-Wall`
+  warnings.
+- **Examples**: `examples/prelude.lind` (default import: gate on both
+  `(Bytes, …)` completion tuples, `%b` the statics) and
+  `examples/no-prelude.lind` (pragma + explicit import with hide
+  list); verified via CLI (exit 0) and `--parse` round-trip (fixed
+  point). All pre-existing examples re-verified (the three exit-1
+  demonstration programs exit 1 on main too — no regression).
+- **Remaining threads (issue #17 + carried)**: the issue's basic-
+  stdlib ambition continues as OPT-IN modules (looping services,
+  collection machines — anything that would keep a default-on program
+  alive must never be default); for #18, file descriptors reuse the
+  §13.13 dynamic-spawn + pending-slot machinery. Flip-worthy pile
+  from this slice is on the messageboard
+  (`provisional-prelude-semantics.txt`): one-shots-only default, one-
+  bag-per-static, the prelude's `Error { }`, builtin-shadows-disk,
+  non-injectable builtins, the `Prelude` handle/name collision
+  hazard, flat-name collision of prelude bags with user bags, and
+  the `Error`-clobbering-semantics question from the issue (still
+  open — the prelude deliberately does not touch §6.4's clobbering
+  rules). Still open in §11: mixed int/double arithmetic (§11.3),
+  effect-runner scope (§11.7), `die` vs `quit` (§11.9), bytestring
+  reclamation (§11.11), fresh-name generation (§9), unified error
+  routing (§3.3/§7.3) — untouched here.

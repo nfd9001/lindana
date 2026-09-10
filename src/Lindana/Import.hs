@@ -57,6 +57,7 @@
 module Lindana.Import
   ( -- * Loading a module's source
     parseModuleFile
+  , parseModuleSource
   , lowerModule
     -- * The mangling pass (exported for tests)
   , mangleProgram
@@ -66,6 +67,7 @@ module Lindana.Import
 import Control.Exception (IOException, try)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Text (Text)
 import qualified Data.Text.IO as TIO
 import System.IO.Error (isDoesNotExistError)
 
@@ -92,10 +94,17 @@ parseModuleFile dir name = do
       | isDoesNotExistError e ->
           pure (Left ("no module file: " ++ path))
       | otherwise -> pure (Left (show (e :: IOException)))
-    Right src -> pure $ case parseProgram src of
-      Left err -> Left ("parse error in " ++ path ++ ":\n"
-                        ++ errorBundlePretty err)
-      Right p  -> Right p
+    Right src -> pure (parseModuleSource path src)
+
+-- | Parse module source text (§13.15: the builtin modules — the
+-- prelude — come from 'Lindana.Prelude.builtinModules' instead of
+-- disk, and go through this same parse). 'Left' is a human-readable
+-- message; the effect runner turns it into a runner-safe fatal.
+parseModuleSource :: String -> Text -> Either String Program
+parseModuleSource label src = case parseProgram src of
+  Left err -> Left ("parse error in " ++ label ++ ":\n"
+                    ++ errorBundlePretty err)
+  Right p  -> Right p
 
 --------------------------------------------------------------------------------
 -- Hide lists

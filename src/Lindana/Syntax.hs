@@ -51,6 +51,15 @@ data Decl
   = Bag Name [Decl]             -- ^ @Name { ... }@ — named bag of machines.
   | Initial [Expr]              -- ^ @{ ... }@ — initial bag tuples.
   | Machine [PatElem] [Action]  -- ^ @pat, pat : actions@ (join patterns).
+  | Pragma String               -- ^ @{-# name #-}@ — a pragma (§13.15,
+                                --   provisional). Top level only (the
+                                --   parser enforces; the loader checks
+                                --   defensively too). The body is a
+                                --   free-form name; the only known pragma
+                                --   is @no-prelude@, which suppresses the
+                                --   default Prelude import (§13.15) — an
+                                --   unknown pragma is a parse error
+                                --   (loud, not silently ignored).
   deriving (Eq, Show)
 
 -- | Per-clause read mode. @Take@ = @in@ (consume, the default),
@@ -169,6 +178,7 @@ renderDecl (Bag n ds) =
   n ++ " {\n"
   ++ concatMap (\d -> "  " ++ indent2 (renderDecl d) ++ "\n") ds
   ++ "}"
+renderDecl (Pragma p) = "{-# " ++ p ++ " #-}"
 
 renderPatList :: [PatElem] -> String
 renderPatList = intercalate ", " . map pe

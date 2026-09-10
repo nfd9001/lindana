@@ -9,6 +9,7 @@ library
                       Lindana.Parser
                       Lindana.Runtime
                       Lindana.Def
+                      Lindana.Prelude
                       Lindana.Import
                       Lindana.Machine
                       Lindana.Loader

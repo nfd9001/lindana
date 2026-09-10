@@ -22,23 +22,35 @@
 --     block (bags are flat, §6; sharding is an internal concern,
 --     §6.3).
 --
--- The §6.4 default @Error@ machine is installed here: if the program
+-- | The §6.4 default @Error@ machine is installed here: if the program
 -- declares no @Error@ bag at all, @(c!) : panic c@ is appended —
 -- @c@ captures the whole @(Error, …)@ tuple (§11.1 rest capture) and
 -- @panic@ makes it fatal. A user-declared @Error { … }@ block, even
 -- an empty one ("silently swallow all errors"), fully replaces the
 -- default — it is never installed alongside a user block.
+--
+-- The §13.15 default Prelude import is also installed here (issue #17
+-- part 3) — the same precedent: loader-owned program shape. The
+-- synthetic one-shot @: import Prelude Nil []@ (‘preludeImportMachine’
+-- below) rides along in every top-level program unless the
+-- @{-# no-prelude #-}@ pragma suppresses it. Modules loaded via the
+-- @import@ effect ('Lindana.Import.lowerModule', which drives
+-- 'loadProgramWith') never get the default — a module that wants the
+-- prelude imports it explicitly, with its own handle and suffix.
 module Lindana.Loader
   ( -- * Loading
     Loaded (..)
   , loadProgram
   , loadProgramWith
+    -- * The §13.15 default Prelude import (exported for tests)
+  , preludeImportMachine
   ) where
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 
 import Lindana.Def (MachineDef (..), globalBag, errorBag)
+import Lindana.Prelude (preludeName)
 import Lindana.Syntax
 
 -- | A lowered program: bag-tagged machine definitions and per-bag
@@ -67,8 +79,9 @@ loadProgram = loadProgramWith errorBag
 loadProgramWith :: Name -> Program -> Either String Loaded
 loadProgramWith errBag (Program ds) = do
   -- Top level: bag blocks, at most one initial block (Global's), and
-  -- (maybe) bare machines for the implicit Global bag.
-  (topInit, topMachs, bagBlocks) <- walkTop ds Nothing [] []
+  -- (maybe) bare machines for the implicit Global bag. Pragmas (§13.15)
+  -- are collected on the way; only top-level pragmas are legal.
+  (topInit, topMachs, bagBlocks, pragmas) <- walkTop ds Nothing [] [] []
   let bagNames = map fst bagBlocks
   -- §6: single declaration site per bag name.
   case duplicates bagNames of
@@ -93,12 +106,38 @@ loadProgramWith errBag (Program ds) = do
         -- @Error ++ suffix@ for an imported module (§13.13).
         | errBag `elem` bagNames = []
         | otherwise              = [defaultErrorMachine errBag]
+      -- §13.15: the default Prelude import — a synthetic one-shot at
+      -- the front of the machine list (an empty-pattern machine runs
+      -- once, unconditionally, at start, §1). The style check above
+      -- ran on the user's declarations only: the synthetic bare-style
+      -- machine must not trip "bare machines + explicit Global".
+      -- Only the top-level program reaches this: modules arrive via
+      -- 'Lindana.Import.lowerModule', which never injects it.
+      preludeMachs
+        | "no-prelude" `elem` pragmas = []
+        | otherwise                   = [preludeImportMachine]
       initialMap = Map.fromList [ (n, es) | (n, Just es) <- globalInit : bagInits ]
       globalInit = (globalBag, topInit)
   pure Loaded
-    { loadedMachines = allMachs ++ defaultError
+    { loadedMachines = preludeMachs ++ allMachs ++ defaultError
     , loadedInitial  = initialMap
     }
+
+-- | The synthetic §13.15 default-import machine: a no-LHS one-shot
+-- (§1) on @Global@ whose only action is @import Prelude Nil []@ — the
+-- ordinary §13.13 import effect, empty suffix, no hide list. Its name
+-- handle @Prelude@ is preregistered in @rtsBytes@ ("Lindana.Machine",
+-- next to @Nil → ""@, not special); the effect loads the prelude from
+-- the builtin registry ('Lindana.Prelude.builtinModules') and emits
+-- the @(Imported, Prelude, …)@ completion tuple like any module.
+-- The §6.4 default Error machine is appended last, as always.
+preludeImportMachine :: MachineDef
+preludeImportMachine = MachineDef
+  { machBag  = globalBag
+  , machSfx  = ""
+  , machJoin = []
+  , machBody = [Import (EAtom preludeName) (EAtom "Nil") (EAtom "Nil")]
+  }
 
 -- | The §6.4 default Error machine: @(c!) : panic c@, installed on
 -- the given bag name (plain @Error@ at top level, the mangled
@@ -122,30 +161,40 @@ machine bag (Machine lhs body) =
   MachineDef bag "" lhs body
 machine _ d = error ("loader invariant: non-machine reached machine(): " ++ show d)
 
--- | Walk the top-level declarations.
+-- | Walk the top-level declarations. Pragmas (§13.15) are collected
+-- here; the loader interprets @no-prelude@ (suppress the default
+-- Prelude import) and ignores nothing else — the parser already
+-- rejects unknown pragma names, and this walk defensively rejects a
+-- pragma anywhere the parser cannot put one.
 walkTop :: [Decl]
         -> Maybe [Expr]                  -- ^ accumulated top-level initial block
         -> [Decl]                        -- ^ accumulated bare machines
         -> [(Name, [Decl])]              -- ^ accumulated bag blocks
-        -> Either String (Maybe [Expr], [Decl], [(Name, [Decl])])
-walkTop [] i m b = Right (i, reverse m, reverse b)
-walkTop (d : ds) i m b = case d of
+        -> [String]                      -- ^ accumulated pragma names
+        -> Either String (Maybe [Expr], [Decl], [(Name, [Decl])], [String])
+walkTop [] i m b ps = Right (i, reverse m, reverse b, ps)
+walkTop (d : ds) i m b ps = case d of
   Initial es | Just _ <- i -> Left "more than one top-level { … } initial block"
-             | otherwise   -> walkTop ds (Just es) m b
-  Machine{} -> walkTop ds i (d : m) b
+             | otherwise   -> walkTop ds (Just es) m b ps
+  Machine{} -> walkTop ds i (d : m) b ps
+  Pragma p  -> walkTop ds i m b (p : ps)
   Bag n inner -> do
     inner' <- walkBag inner
-    walkTop ds i m ((n, inner') : b)
+    walkTop ds i m ((n, inner') : b) ps
 
 -- | Walk the inside of one bag block: machines and (at most one)
 -- initial block for that bag. Nested bag blocks are rejected (§6:
 -- bags are flat; §6.3's sharding is internal, not a user construct).
+-- Pragmas are top-level only (the parser enforces this too; this is
+-- the defensive check for hand-built ASTs).
 walkBag :: [Decl] -> Either String [Decl]
 walkBag = go []
   where
     go acc [] = Right (reverse acc)
     go _ (Bag _ _ : _) = Left
       "nested bag block: bags are flat — declare bags at top level (§6)"
+    go _ (Pragma _ : _) = Left
+      "pragma inside a bag block: pragmas are top level only (§13.15)"
     go acc (d : ds) = go (d : acc) ds
 
 -- | Flatten the bag blocks into bag-tagged machines and per-bag

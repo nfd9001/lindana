@@ -1,0 +1,7 @@
+-- §13.15 (issue #17 part 3): the Prelude is imported by default in
+-- the top-level file, prefixless — its one-shot machines preregister
+-- statics (Newline, Version) as bytestring handles. Binds are
+-- deferred effects, so consumers gate on the (Bytes, H) completion
+-- tuples (§9) rather than racing them.
+(Bytes, Version), (Bytes, Newline) :
+  [say "Lindana %b" Version; say "newline bound%b" Newline; exit 0]

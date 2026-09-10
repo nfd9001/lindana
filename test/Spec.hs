@@ -290,6 +290,26 @@ main = hspec $ do
         ]
       progDecls p `shouldHaveLength` 2
       roundTrips ": [say \"Hello world!\"; (Stop, 0)]" `shouldBe` True
+
+    -- §13.15 (issue #17 part 3): the pragma — how a top-level file
+    -- opts out of the default Prelude import. Top level only, free-
+    -- form name matched against the known pragmas; unknown = loud
+    -- parse error, never silently ignored.
+    describe "pragma (§13.15, issue #17 part 3)" $ do
+      it "parses {-# no-prelude #-} at top level and round-trips" $ do
+        p <- parseOk "{-# no-prelude #-}\n(Tick,) : die"
+        progDecls p `shouldBe`
+          [Pragma "no-prelude"
+          ,Machine [PatElem Take (PTuple [PAtom "Tick"])] [Die]]
+        roundTrips "{-# no-prelude #-}\n(Tick,) : die" `shouldBe` True
+      it "may come after other declarations" $ do
+        p <- parseOk "(Tick,) : die\n{-# no-prelude #-}"
+        progDecls p `shouldHaveLength` 2
+      it "rejects an unknown pragma (loud, not ignored)" $
+        parseProgram "{-# no-ticks #-}\n(Tick,) : die" `shouldSatisfy` isLeft
+      it "is not allowed inside a bag block" $
+        parseProgram "W { {-# no-prelude #-}\n(Ping,) : die }"
+          `shouldSatisfy` isLeft
   spec
   LoaderSpec.spec
   RuntimeSpec.spec
