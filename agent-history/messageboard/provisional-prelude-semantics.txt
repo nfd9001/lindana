@@ -1,0 +1,126 @@
+PROVISIONAL DECISIONS — the Prelude (handover §13.15)
+=====================================================
+
+Status:   PROVISIONAL — the "flip-worthy pile" recorded in PR #22's
+          summary (branch runtime/prelude, issue #17 part 3).
+          Each item is independently flippable; do not treat any of
+          them as final until a real grammar/semantics pass ratifies
+          them. Written down here so the pile doesn't have to be
+          re-derived from the PR body.
+
+1. ONE-SHOTS-ONLY DEFAULT (the big one)
+   ------------------------------------
+   Decision: the default Prelude contains only §1 empty-pattern
+   one-shot machines that preregister statics and die. No looping
+   services, ever, in the default import.
+
+   Why: machines loop by default (§1) and a blocked machine keeps
+   the run alive — a default-on forever-machine would make EVERY
+   program non-terminating (every deadlock-by-exhaustion program
+   hangs, every existing example and test changes meaning). The
+   issue's basic-stdlib ambition continues as OPT-IN modules
+   instead.
+
+   To flip: add a looping service to preludeSource in
+   Lindana.Prelude and accept that every program carries it;
+   amend §13.15 and the LoaderSpec e2e expectations.
+
+2. ONE BAG PER STATIC
+   ------------------
+   Decision: each preregistration lives in its own bag block
+   (Newline { … }, Version { … }), so the import's hide list can
+   pick machines off individually (hideBags hides bag blocks'
+   machines, pre-mangle names).
+
+   Why: the hide list is the only customization granularity the
+   §13.13 machinery offers; without one-bag-per-static, the only
+   hideable unit would be Global (all-or-nothing).
+
+   To flip: collapse the prelude's one-shots into bare machines
+   (bag Global) and accept that hiding is all-or-nothing; amend
+   §13.15 and the hide-list e2e test.
+
+3. THE PRELUDE'S OWN Error { }
+   ---------------------------
+   Decision: the prelude source declares `Error { }` so its own
+   lowering installs no §6.4 default Error machine. Without it,
+   every program would carry TWO racing `(c!) : panic c` machines
+   on the plain Error bag (the prelude's lowering would install one
+   alongside the top-level program's) — §3.1 chaos on panic paths.
+
+   Why: the top-level program's own default (or user Error block)
+   should alone own the plain Error bag; the prelude adds machines,
+   not error policy.
+
+   To flip: remove the block and accept the racing defaults (or
+   special-case the loader to skip the default for prelude
+   lowerings — a special case, hence avoided); amend §13.15.
+
+4. BUILTINS SHADOW DISK
+   --------------------
+   Decision: importOnce consults the builtin registry
+   (Lindana.Prelude.builtinModules) BEFORE hookModDir — a user file
+   named Prelude.lind next to the program is shadowed. The
+   prelude's name is effectively reserved.
+
+   Why: the prelude is RTS-owned; letting a disk file override it
+   would let a stale fixture silently change every program's
+   startup behavior.
+
+   To flip: swap the lookup order in importOnce (one case
+   expression) and document the on-disk override convention;
+   amend §13.15.
+
+5. BUILTINS ARE NOT INJECTABLE
+   ---------------------------
+   Decision: the builtin registry is a plain constant
+   (Lindana.Prelude.builtinModules), not a Hooks field. Tests
+   cannot substitute a fake prelude source; they exercise the
+   mechanism via the pragma and hide lists instead.
+
+   Why: a Hooks field would touch every Hooks record literal in
+   the tests for no current use case.
+
+   To flip: add hookBuiltinMods :: Map Name Text to Hooks, thread
+   it through importOnce, and update the record literals.
+
+6. `PRELUDE` THE HANDLE/NAME COLLISION HAZARD
+   ------------------------------------------
+   Decision: the preregistered name handle and the module name are
+   the same atom ("Prelude" → "Prelude"); the default-import
+   machine's completion tuple reads (Imported, Prelude, …).
+   Deliberately collidable like every atom (§4): a user
+   bytesBind Prelude "evil" racing the default import machine's
+   effect would make the import load the wrong thing (runner-safe
+   fatal at worst). Not guarded.
+
+   To flip: rename the handle to something less collidable (one
+   constant, preludeName, in Lindana.Prelude); amend §13.15.
+
+7. FLAT-NAME COLLISION: PRELUDE BAGS VS USER BAGS
+   ----------------------------------------------
+   Decision: the prelude loads prefixless, so its bag names
+   (Newline, Version) are flat — a top-level user bag named
+   Newline IS the prelude's Newline bag (same TVar, machines from
+   both match there). Documented hazard of the empty suffix
+   (§13.13's "empty allowed, though… a bad idea" cuts both ways);
+   the default suffix is the issue's explicit call, kept.
+
+   To flip: default the prelude import to a reserved suffix
+   (e.g. "_Prelude") — but then its atoms don't read as written,
+   contradicting "prefixless"; amend §13.15 and the examples.
+
+8. THE ERROR-CLOBBERING QUESTION (still open)
+   ------------------------------------------
+   Issue #17: "we're early in, so we can change the semantics for
+   clobbering Error with [the prelude default]". This slice
+   deliberately does NOT touch §6.4's clobbering rules — the
+   prelude adds no Error policy at all. The question (should the
+   prelude supply a default Error handler the user's Error block
+   replaces? should the pragma also suppress the §6.4 default?)
+   remains open; recorded here so it isn't forgotten when the
+   stdlib grows.
+
+Full context: lindana-handover.md §13.15; PR body;
+src/Lindana/Prelude.hs module header (which records most of these
+in code).

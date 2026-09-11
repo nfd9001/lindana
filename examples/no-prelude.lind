@@ -1,0 +1,8 @@
+-- §13.15: opting out. {-# no-prelude #-} suppresses the default
+-- Prelude import; an explicit import brings it back with whatever
+-- hide list you want (here: hide Version, keep Newline). Without the
+-- pragma an explicit import is a harmless singleton repeat — first
+-- import wins (§13.13).
+{-# no-prelude #-}
+: import Prelude Nil [Version]
+(Bytes, Newline) : [say "own prelude import, Newline bound%b" Newline; exit 0]

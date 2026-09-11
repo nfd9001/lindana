@@ -459,9 +459,12 @@ spec = do
       let m = machine []
             [ BytesBind "G" (consL [int 65]), BytesDestroy (EAtom "G"), Die ]
       r <- runProgram [m] []
-      -- Only the destroy target is gone; the §13.13 preregistered
-      -- Nil → "" entry survives (it may itself be clobbered/destroyed).
-      rrBytes r `shouldBe` Map.singleton "Nil" ""
+      -- Only the destroy target is gone; the two preregistered entries
+      -- survive (§13.13 Nil → "" — the free empty suffix — and §13.15
+      -- Prelude → "Prelude" — the default import's name handle; either
+      -- may itself be clobbered/destroyed).
+      rrBytes r `shouldBe` Map.fromList
+        [("Nil", ""), ("Prelude", encodeUtf8 (T.pack "Prelude"))]
 
     it "bytesEqual compares contents; == stays pure atom identity (§9)" $ do
       -- Gate on the (Bytes, H) completion tuples: the binds are

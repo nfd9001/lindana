@@ -10,8 +10,10 @@ module Lindana.LoaderSpec (spec) where
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Text as T
 import System.Exit (ExitCode (..))
+import System.Timeout (timeout)
 
 import Data.List (sort)
 import Test.Hspec
@@ -21,6 +23,14 @@ import Lindana.Machine
 import Lindana.Parser (parseProgram)
 import Lindana.Runtime (Val (..), stringVal)
 import Lindana.Syntax
+
+-- | The §6.4 default Error machine, by shape (LoaderSpec's oldest
+-- tests filter it out of machine lists; the loader appends it when
+-- the program declares no Error bag).
+isDefaultError :: MachineDef -> Bool
+isDefaultError m = machBag m == errorBag
+                   && machBody m == [Panic (EVar "c")]
+                   && machJoin m == [PatElem Take (PTuple [PRest "c"])]
 
 -- | Parse and load, failing the test on parse or load errors.
 loadOk :: String -> IO Loaded
@@ -46,9 +56,12 @@ spec = do
   describe "bag scoping (§6)" $ do
     it "bare top-level machines belong to Global" $ do
       l <- loadOk "(Ping,) : die"
-      -- The §6.4 default Error machine is appended by the loader; scope
-      -- the check to the user's machines.
-      map machBag (filter (\m -> machBag m /= "Error" || machBody m /= [Panic (EVar "c")]) (loadedMachines l))
+      -- The §6.4 default Error machine is appended by the loader, and
+      -- the §13.15 default Prelude import machine is prepended (both
+      -- filtered/skipped here); scope the check to the user's machines.
+      map machBag (filter (\m -> not (isDefaultError m)
+                                 && m /= preludeImportMachine)
+                          (loadedMachines l))
         `shouldBe` ["Global"]
 
     it "machines inside a bag block are tagged with that bag" $ do
@@ -59,8 +72,11 @@ spec = do
         , "}"
         , "(Tick,) : die"
         ]
+      -- Error + the two user bags' machines, plus two Global-tagged
+      -- synthetics: the user's bare (Tick,) machine and the §13.15
+      -- default Prelude import one-shot.
       sort (map machBag (loadedMachines l))
-        `shouldBe` ["Error", "Global", "Workers", "Workers"]
+        `shouldBe` ["Error", "Global", "Global", "Workers", "Workers"]
 
     it "a { … } block inside a bag block is that bag's initial state (§11.10)" $ do
       l <- loadOk $ unlines
@@ -123,7 +139,10 @@ spec = do
         , "  (Ping,) : die"
         , "}"
         ]
-      sort (map machBag (loadedMachines l)) `shouldBe` ["Error", "Global"]
+      -- The synthetic Prelude import machine (a bare-style one-shot on
+      -- Global) must not trip the "pick one style" check above.
+      sort (map machBag (loadedMachines l))
+        `shouldBe` ["Error", "Global", "Global"]
 
   describe "the §6.4 default Error machine" $ do
     it "is installed when the program declares no Error bag" $ do
@@ -180,8 +199,11 @@ spec = do
         ]
       -- The loader must accept an empty join pattern (§1: runs once,
       -- unconditionally, at start) without mangling it. (The §6.4
-      -- default Error machine is also present; filter it out.)
-      let userMachs = [m | m <- loadedMachines l, machBag m /= errorBag]
+      -- default Error machine and the §13.15 Prelude import machine
+      -- are also present; filter both out.)
+      let userMachs = [m | m <- loadedMachines l
+                         , not (isDefaultError m)
+                         , m /= preludeImportMachine]
       [oneshot, stopper] <- pure userMachs
       machBag oneshot `shouldBe` "Global"
       machJoin oneshot `shouldBe` []
@@ -235,8 +257,11 @@ spec = do
       rrExit rr `shouldBe` ExitSuccess
 
     it "handles are opaque: same bytes, distinct atoms (§9)" $ do
+      -- The prelude's one-shots would add their own completion tuples
+      -- to Global, so this exact-bag test opts out via the pragma.
       l <- loadOk $ unlines
-        [ ": [bytesBind A [72]; bytesBind B [72, 72]; (Go,)]"
+        [ "{-# no-prelude #-}"
+        , ": [bytesBind A [72]; bytesBind B [72, 72]; (Go,)]"
         , "(Bytes, A), (Bytes, B), (Go,) :"
         , "  [ if bytesEqual(A, B) then (ContentEq,) else (ContentNeq,)"
         , "  ; if A == B then (SameAtom,) else (DifferentAtoms,)"
@@ -275,6 +300,94 @@ spec = do
       (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
       said `shouldBe` ["bytesRead round-trips; matched the \"Ok\" pattern"]
       rrExit rr `shouldBe` ExitSuccess
+
+  -- §13.15 (issue #17 part 3): the default Prelude import. The loader
+  -- prepends a synthetic one-shot ': import Prelude Nil []' to every
+  -- top-level program (after the pragma check); the import effect
+  -- loads the prelude from the builtin registry and its one-shot
+  -- machines preregister their statics. All programs here end in an
+  -- explicit 'exit' (the §13.8 house rule) and gate on completion
+  -- tuples — the prelude's binds are deferred effects, so consumers
+  -- must join on the (Bytes, H) gates (§9).
+  describe "the default Prelude import (§13.15, issue #17 part 3)" $ do
+    it "prepends the synthetic import machine by default" $ do
+      l <- loadOk "(Ping,) : die"
+      head (loadedMachines l) `shouldBe` preludeImportMachine
+      machBag preludeImportMachine `shouldBe` "Global"
+      machJoin preludeImportMachine `shouldBe` []
+      machBody preludeImportMachine
+        `shouldBe` [Import (EAtom "Prelude") (EAtom "Nil") (EAtom "Nil")]
+
+    it "{-# no-prelude #-} suppresses it" $ do
+      l <- loadOk "{-# no-prelude #-}\n(Ping,) : die"
+      loadedMachines l `shouldNotContain` [preludeImportMachine]
+
+    it "the prelude's statics are bound by default (e2e)" $ do
+      -- Gate on the (Bytes, Version) completion tuple: the prelude's
+      -- binds are deferred effects run by the effect runner, so a
+      -- consumer must join on the gate, not race it.
+      l <- loadOk $ unlines
+        [ "(Bytes, Version) : [say \"lindana %b\" Version; (D,)]"
+        , "(D,) : exit 0"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["lindana 0.1.0.0"]
+      rrExit rr `shouldBe` ExitSuccess
+      -- The whole gate set: both static binds landed, and the default
+      -- import emitted its completion tuple (the empty suffix renders
+      -- as the Nil atom).
+      let bs = rrBytes rr
+      Map.lookup "Newline" bs `shouldBe` Just (encodeUtf8 (T.pack "\n"))
+      Map.lookup "Version" bs `shouldBe` Just (encodeUtf8 (T.pack "0.1.0.0"))
+      rrBag rr `shouldContain`
+        [VTuple [VAtom "Imported", VAtom "Prelude", VAtom "Nil"]]
+
+    it "pragma + explicit import brings it back with a hide list (e2e)" $ do
+      -- The customization story: opt out, then import explicitly and
+      -- hide what you don't want. Version's machine is skipped (no
+      -- (Bytes, Version) gate ever lands); Newline still binds.
+      l <- loadOk $ unlines
+        [ "{-# no-prelude #-}"
+        , ": import Prelude Nil [Version]"
+        , "(Bytes, Newline) : [say \"nl%b\" Newline; (D,)]"
+        , "(D,) : exit 0"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["nl\n"]
+      rrExit rr `shouldBe` ExitSuccess
+      Map.member "Version" (rrBytes rr) `shouldBe` False
+      Map.lookup "Newline" (rrBytes rr) `shouldBe` Just (encodeUtf8 (T.pack "\n"))
+
+    it "an explicit import without the pragma is a singleton repeat (e2e)" $ do
+      -- First import wins (§13.13): the default import got there
+      -- first, so the explicit one is a skip — but still emits its
+      -- completion. The join of two (Imported, Prelude, …) takes
+      -- proves both completions exist and (via exit 0) that the run
+      -- terminated cleanly with the prelude spawned exactly once.
+      l <- loadOk $ unlines
+        [ ": import Prelude Nil []"
+        , "(Imported, Prelude, Nil), (Imported, Prelude, Nil) : exit 0"
+        ]
+      r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
+      rrExit r `shouldBe` ExitSuccess
+
+    it "a repeat import settles its pending slot (e2e regression)" $ do
+      -- §13.13's "−1 on skip" was not implemented: a repeat import
+      -- leaked its pending-import slot, so a program relying on the
+      -- run-alive check (live == 0) instead of exit hung forever once
+      -- the default Prelude import made repeat imports routine. No
+      -- exit here on purpose — termination comes from live == 0, and
+      -- Error { } keeps the §6.4 default machine out of the count.
+      l <- loadOk $ unlines
+        [ "Error { }"
+        , ": import Prelude Nil []"
+        , "(Imported, Prelude, Nil), (Imported, Prelude, Nil) : [(Done,); die]"
+        ]
+      mr <- timeout (10 * 1000000)
+              (runLoaded silentHooks (loadedMachines l) (loadedInitial l))
+      case mr of
+        Nothing -> expectationFailure "run hung: repeat import leaked its pending slot"
+        Just r  -> rrExit r `shouldBe` ExitSuccess
 
 -- | Run loaded, capturing @say@ output and the result.
 --

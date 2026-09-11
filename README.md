@@ -52,10 +52,20 @@ Git history might be a better source-of-truth about recent progress until I've e
   `reroute Src Tgt` repoints the `error` verb, bag-specific keys
   taking precedence over a module's mangled Error bag ("all bags in
   the module").
+- `src/Lindana/Prelude.hs` — the Prelude (issue #17 part 3, §13.15):
+  a builtin module (source embedded in the RTS) imported by default
+  in the top-level file, prefixless, through the ordinary import
+  machinery. One-shot preregistration machines only (`Newline`,
+  `Version`) — a looping service in the default import would keep
+  every program alive forever. The loader prepends the synthetic
+  `: import Prelude Nil []` one-shot unless `{-# no-prelude #-}`
+  opts out (then an explicit import brings it back, hide list and
+  all).
 - `src/Lindana/Loader.hs` — the program loader: lowers a parsed
   `Program` into bag-tagged machines + per-bag initial tuples,
-  enforces the §6 declaration rules, and installs the §6.4 default
-  `Error` machine when the program declares no `Error` bag.
+  enforces the §6 declaration rules, installs the §6.4 default
+  `Error` machine when the program declares no `Error` bag, and
+  prepends the §13.15 default Prelude import unless pragma'd out.
 - `app/Main.hs` — `lindana <file.lind>`: parse, load, and run;
   exits with the program's status. `--parse` re-renders only.
 - `test/Spec.hs` + `test/Lindana/` — hspec suite: parser round-trips,
@@ -72,6 +82,9 @@ Git history might be a better source-of-truth about recent progress until I've e
   gate on the `(Imported, …)` completion tuple; `reroute.lind` +
   `flaky.lind` (§13.14) import a failing module and reroute its whole
   error stream into a collector (last update wins, tag-as-provenance);
+  `prelude.lind` + `no-prelude.lind` (§13.15) show the default
+  Prelude import (gating on its `(Bytes, …)` completion tuples) and
+  the pragma + explicit-import-with-hide-list opt-out;
   `brainfuck.lind`
   (§13.12) is a Brainfuck interpreter — zipper program and tape,
   jump-table brackets, CPS reversal via `!` splice — that runs the
@@ -133,7 +146,13 @@ skip bags; `Nil → ""` is preregistered so the empty suffix is free;
 rerouting (§13.14, issue #17, provisional: `reroute Src Tgt` repoints
 the `error` verb — a specific bag's errors, or a whole module's when
 `Src` is its mangled Error bag; last update wins; the tuple's tag
-stays the original mangled Error bag — provenance).
+stays the original mangled Error bag — provenance), and the Prelude
+(§13.15, issue #17 part 3, provisional: imported by default in the
+top-level file, prefixless — one-shot preregistration machines only
+(`Newline`, `Version`); `{-# no-prelude #-}` opts out, an explicit
+`import Prelude Nil […]` after the pragma brings it back with a hide
+list; the prelude is a builtin module — source in the RTS, resolved
+by the import effect before disk).
 Effect bundles need no syntax (§11.6, provisionally resolved): a
 reaction's post-commit action list *is* the bundle.
 

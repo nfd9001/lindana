@@ -529,11 +529,16 @@ importP = rword "import" *> (Import <$> exprP <*> exprP <*> exprP)
 programP :: Parser Program
 programP = do
   ws
-  ds <- many (try (skipLines >> declInner))
+  ds <- many (try (skipLines >> topDeclP))
   ws
   skipLines
   eof
   pure (Program ds)
+
+-- | Top-level declarations: everything a bag block may hold, plus
+-- pragmas (§13.15) — which are top-level only.
+topDeclP :: Parser Decl
+topDeclP = choice [pragmaP, declInner]
 
 declInner :: Parser Decl
 declInner = choice
@@ -541,6 +546,24 @@ declInner = choice
   , initialBlockP
   , machineP
   ]
+
+-- | @{-# name #-}@ — a pragma (§13.15, provisional, flip-worthy). The
+-- body is read literally up to @-#}@ and matched against the known
+-- pragma names; an unknown pragma is a parse error (loud, never
+-- silently ignored — a typo'd pragma must not silently do nothing).
+-- Top level only: 'declInner' (what bag blocks may hold) does not
+-- include it, so a pragma inside a bag block is a parse error.
+pragmaP :: Parser Decl
+pragmaP = do
+  _ <- try (void (string "{-#"))
+  ws
+  body <- T.strip . T.pack <$> manyTill anySingle (string "#-}")
+  ws
+  endOfMachine
+  if body == "no-prelude"
+    then pure (Pragma "no-prelude")
+    else fail ("unknown pragma: {-# " ++ T.unpack body
+               ++ " #-} (known: no-prelude)")
 
 -- | @Name { ... }@ — a named bag. Braces do NOT raise the newline
 -- depth: machines inside are one-per-line, like at top level.
