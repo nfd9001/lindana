@@ -336,11 +336,18 @@ evalElemG builtin env e = (:[]) <$> evalExprG builtin env e
 arith :: Op -> Val -> Val -> Val
 -- §9: @==@ stays pure atom identity, uniformly — comparing two
 -- bytestring handles compares the handles, not the contents.
+-- Issue #24: the ordering ops are numeric-only. Atoms order nowhere
+-- (== and != are their whole story; bytestring CONTENT ordering is
+-- @bytesCompare@'s job, reaching into the side-table, never the
+-- matcher's or arith's), and an atom never orders against a number.
+-- Mixed int/double stays an error, like mixed arithmetic (§11.3,
+-- still open) — flip-worthy if that question resolves toward
+-- promotion.
 arith Eq  (VAtom a) (VAtom b) = VInt (if a == b then 1 else 0)
 arith Neq (VAtom a) (VAtom b) = VInt (if a /= b then 1 else 0)
 arith op (VInt a) (VInt b)       = VInt (intOp op a b)
 arith op (VDouble a) (VDouble b) = VDouble (dblOp op a b)
-arith _ _ _ = error "arith: non-numeric operands (must route via error, §3.3)"
+arith _ _ _ = error "arith: operands must be same-kind numerics (atoms support only ==/!=, issue #24; must route via error, §3.3)"
 
 -- Numeric helpers live at top level rather than in a @where@: GHC 9.0
 -- only scopes a @where@ over the equations it follows, and @arith@'s
@@ -352,6 +359,10 @@ intOp Mul = (*)
 intOp Div = div
 intOp Eq  = \a b -> if a == b then 1 else 0
 intOp Neq = \a b -> if a /= b then 1 else 0
+intOp Lt  = \a b -> if a <  b then 1 else 0
+intOp Gt  = \a b -> if a >  b then 1 else 0
+intOp Le  = \a b -> if a <= b then 1 else 0
+intOp Ge  = \a b -> if a >= b then 1 else 0
 
 dblOp :: Op -> Double -> Double -> Double
 dblOp Add = (+)
@@ -360,3 +371,7 @@ dblOp Mul = (*)
 dblOp Div = (/)
 dblOp Eq  = \a b -> if a == b then 1 else 0
 dblOp Neq = \a b -> if a /= b then 1 else 0
+dblOp Lt  = \a b -> if a <  b then 1 else 0
+dblOp Gt  = \a b -> if a >  b then 1 else 0
+dblOp Le  = \a b -> if a <= b then 1 else 0
+dblOp Ge  = \a b -> if a >= b then 1 else 0

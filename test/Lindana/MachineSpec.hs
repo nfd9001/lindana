@@ -446,6 +446,51 @@ spec = do
       output <- readIORef said
       reverse output `shouldBe` ["after-slept"]
 
+  describe "ordering comparisons (issue #24)" $ do
+    it "orders ints and doubles; comparisons drive branches" $ do
+      let m = machine (take1 (p1 "Go"))
+            [ If (EBin Lt (int 1) (int 2)) [Out (t [EAtom "LtYes"])] [Out (t [EAtom "LtNo"])]
+            , If (EBin Le (int 2) (int 1)) [Out (t [EAtom "LeYes"])] [Out (t [EAtom "LeNo"])]
+            , If (EBin Ge (EDouble 2.0) (EDouble 2.0)) [Out (t [EAtom "GeDbl"])] [Out (t [EAtom "GeNo"])]
+            , Die ]
+      r <- runProgram [m] [t [EAtom "Go"]]
+      sort (map renderVal (rrBag r)) `shouldBe` ["(GeDbl)", "(LeNo)", "(LtYes)"]
+
+    it "mixed int/double ordering is an error, like mixed arithmetic (§11.3)" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (p1 "Go"))
+            [ Out (t [EAtom "Seen"])
+            , If (EBin Lt (int 1) (EDouble 2.0))
+                 [Out (t [EAtom "Less"])] [Out (t [EAtom "More"])] ]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
+      rrBag r `shouldBe` [VTuple [VAtom "Go"]]
+      output <- readIORef said
+      output `shouldBe` []
+
+    it "atoms order nowhere: < on two atoms aborts the machine's transaction" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (p1 "Go"))
+            [ Out (t [EAtom "Seen"])
+            , If (EBin Lt (EAtom "A") (EAtom "B"))
+                 [Out (t [EAtom "Less"])] [Out (t [EAtom "More"])] ]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
+      -- The interpret-time error kills the transaction: the Out never
+      -- commits, the tuple stays in the bag, no effects leak.
+      rrBag r `shouldBe` [VTuple [VAtom "Go"]]
+      output <- readIORef said
+      output `shouldBe` []
+
+    it "an atom never orders against a number (issue #24)" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (p1 "Go"))
+            [ Out (t [EAtom "Seen"])
+            , If (EBin Lt (EAtom "A") (int 3))
+                 [Out (t [EAtom "Less"])] [Out (t [EAtom "More"])] ]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
+      rrBag r `shouldBe` [VTuple [VAtom "Go"]]
+      output <- readIORef said
+      output `shouldBe` []
+
   describe "bytestring side-table (§9)" $ do
     it "bytesBind registers a UTF-8 bytestring and emits (Bytes, H) completion" $ do
       let m = machine []
@@ -516,6 +561,38 @@ spec = do
       r <- runGlobal hooks [m] [t [EAtom "Go"]]
       -- The interpret-time error kills the transaction: the Out never
       -- commits, the tuple stays in the bag, no effects leak.
+      rrBag r `shouldBe` [VTuple [VAtom "Go"]]
+      output <- readIORef said
+      output `shouldBe` []
+
+    it "bytesCompare orders contents lexicographically (§9, issue #24)" $ do
+      -- Gate on the (Bytes, H) completion tuples: the binds are
+      -- deferred effects, so consumers must join on them (§9).
+      let m = machine (concat
+              [ take1 (PTuple [a "Bytes", a "A"])
+              , take1 (PTuple [a "Bytes", a "B"])
+              , take1 (PTuple [a "Bytes", a "C"])
+              , take1 (p1 "Go") ])
+            [ Out (t [EAtom "AB", ECall "bytesCompare" [EAtom "A", EAtom "B"]])
+            , Out (t [EAtom "BA", ECall "bytesCompare" [EAtom "B", EAtom "A"]])
+            , Out (t [EAtom "AC", ECall "bytesCompare" [EAtom "A", EAtom "C"]])
+            , Die ]
+          b = machine [] [ BytesBind "A" (consL [int 97, int 112, int 112])   -- "app"
+                         , BytesBind "B" (consL [int 97, int 112, int 114])   -- "apr"
+                         , BytesBind "C" (consL [int 97, int 112, int 112])   -- "app" again
+                         , Die ]
+      r <- runProgram [m, b] [t [EAtom "Go"]]
+      -- C holds the same bytes as A under a distinct handle: the
+      -- comparison is of contents, and equality is 0.
+      sort (map renderVal (rrBag r)) `shouldBe`
+        ["(AB, -1)", "(AC, 0)", "(BA, 1)"]
+
+    it "bytesCompare on an unbound handle aborts the machine's transaction (issue #24)" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (p1 "Go"))
+            [ Out (t [EAtom "Seen"])
+            , Out (t [ECall "bytesCompare" [EAtom "Nope", EAtom "Nope"]]) ]
+      r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple [VAtom "Go"]]
       output <- readIORef said
       output `shouldBe` []

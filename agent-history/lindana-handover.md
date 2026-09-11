@@ -827,3 +827,78 @@ builtin registry; the import machinery does all the work).
   effect-runner scope (§11.7), `die` vs `quit` (§11.9), bytestring
   reclamation (§11.11), fresh-name generation (§9), unified error
   routing (§3.3/§7.3) — untouched here.
+
+### 13.16 Done — ordering comparisons (§4, §9, §11.3), branch `runtime/comparisons` (issue #24)
+
+Takes issue #24 as a sidebar slice: `<`, `>`, `<=`, `>=` join
+`==`/`!=`, plus the issue's bytestring "enriched versions" and its
+atom rulings. One new builtin; no new tables or effects.
+
+- **Operators (provisional, flip-worthy)**: `Lt | Gt | Le | Ge` in
+  `Op`; `renderOp` emits the four symbols. **C-style precedence**:
+  the parser gains a level — ordering binds tighter than equality,
+  additive tighter than both, multiplicative tightest (all
+  left-associative). The renderer parenthesises every `EBin`
+  regardless, so renders round-trip (tested with mixed
+  `a >= 1 == b`, `a > b < 3` chains).
+- **Semantics (the issue's rulings, implemented)**: ordering is
+  **numeric-only, same-kind** — `VInt` vs `VInt` and `VDouble` vs
+  `VDouble` (returning `1`/`0`, VInt for ints / VDouble for doubles
+  consistent with the existing `Eq`/`Neq` equations). Atoms order
+  /nowhere/: the issue says atom equality (hence inequality) is
+  well-defined, and an atom never orders against a number — the
+  provisional extension is that atom-vs-atom `<` etc. is /also/ an
+  error (the issue's wording grants atoms only `==`/`!=`; content
+  ordering is what `bytesCompare` is for). All rejections are the
+  usual provisional Haskell errors that abort the machine's
+  transaction (§3.3 routing; now with a sharper message: "atoms
+  support only ==/!=, issue #24").
+- **Mixed int/double ordering**: strict, like mixed arithmetic —
+  an error, not a promotion. §11.3 (mixed int/double arithmetic,
+  still open) is adjacent but untouched: whatever it resolves to
+  would naturally extend to comparisons. Flip-worthy alongside it.
+- **`bytesCompare(A, B)`** (§9, the issue's "enriched versions for
+  ByteStrings — lexicographic ordering where appropriate"): one
+  builtin, not four predicates — lexicographic /bytewise/ ordering
+  of the side-table CONTENTS, returning `VInt -1`/`0`/`1`, from
+  which `< <= > >=` derive by comparing against 0 (the e2e test
+  derives exactly that way). Bytewise on UTF-8 == codepoint order,
+  so this is the natural string ordering. `==` on handles stays
+  pure atom identity (§9 unchanged) — reaching into the side-table
+  is a verb's job, same split as `bytesEqual`. Missing handle:
+  provisional error, same routing as `bytesEqual`.
+- **Found while writing `examples/sort.lind` — reserved words are
+  legal-looking variable names and die with the generic megaparsec
+  error**: `(B, [a, b | t], swaps, out) : …` fails with "unexpected
+  '(' expecting end of input or newline" because `out` is the verb
+  (rword). The rejection is correct; the diagnosis cost a bisect.
+  Another data point for §13.10's house-wide parser-error-message
+  thread (surfacing real messages via `label`/`withLastError`-
+  style plumbing would be its own slice). The example now uses
+  `built`.
+- **Tests**: 12 new — Spec: the four ops parse, both precedence
+  rules, round-trip, `bytesCompare` grammar; RuntimeSpec: numeric
+  ordering eval (int + double), atom-vs-atom and atom-vs-number
+  ordering throw; MachineSpec: comparisons drive branches e2e,
+  mixed int/double / atom-vs-atom / atom-vs-number transaction
+  aborts, `bytesCompare` lexicographic (less/equal/greater incl.
+  same-bytes-distinct-handles), unbound-handle abort; LoaderSpec
+  e2e: `bytesCompare(A, B) < 0` gating, `2 + 2 >= 4`, exit-code
+  steering. 175 total green, randomized order, 3× repeat stable.
+  Zero `-Wall` warnings.
+- **Example**: `examples/sort.lind` — a bubble sort as pure
+  machines: each pass bubbles once counting swaps (`<=` decides
+  every swap), a generic `Rev` straightens the cons-built output,
+  zero-swap passes (base case in an `if` body, per the §13.12
+  race lesson — a competing pattern would race) recurse via
+  `(Sort, acc)`; plus a `bytesCompare` lexicographic demo gating
+  the sort's start (deterministic output; `apple < apricot`, then
+  1–9, `sorted.`, exit 0). Verified via CLI (5× identical output)
+  and `--parse` round-trip (fixed point; the rendered form still
+  runs).
+- **Remaining threads**: unchanged from §13.15 — §11.3 (mixed
+  arithmetic; comparisons recorded as flip-worthy alongside),
+  §11.7, §11.9, §11.11, fresh-name generation, unified error
+  routing (the new ordering-abort messages are the same provisional
+  Haskell-error family), and the parser-error-message plumbing
+  (new data point above).

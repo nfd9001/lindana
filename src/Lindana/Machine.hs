@@ -364,7 +364,10 @@ evalR rts env = evalExprG (rtsBuiltin rts) env
 -- cons-list and decodes it ('casualString') before the capitalization
 -- check; @atos@ hands back a casual string ('stringVal') — there is
 -- no Str type (§11.4). @bytesEqual@ compares contents via the
--- side-table; @bytesRead@ is the decode-back path (§9, issue #12):
+-- side-table; @bytesCompare@ (issue #24) is the bytestring's enriched
+-- ordering comparison — lexicographic (bytewise) on the contents,
+-- @-1@/@0@/@1@ as plain Ints; @==@ on handles still compares only the
+-- handles. @bytesRead@ is the decode-back path (§9, issue #12):
 -- the handle's bytes decoded as UTF-8 into the codepoint cons-list
 -- the bind consumed, so a string run in and out of the side-table is
 -- the identity.
@@ -390,6 +393,23 @@ rtsBuiltin rts name args = case (name, args) of
     case (Map.lookup x m, Map.lookup y m) of
       (Just a, Just b) -> pure (VInt (if a == b then 1 else 0))
       _ -> error ("bytesEqual: unknown bytestring handle(s): " ++ x ++ ", " ++ y)
+  -- §9 (issue #24): the bytestring's "enriched versions" of the
+  -- ordering comparisons — lexicographic (bytewise) ordering of the
+  -- CONTENTS, one builtin returning @-1@/@0@/@1@ (from which @<@,
+  -- @<=@, @>@, @>=@ derive by comparison against 0) rather than four
+  -- dedicated predicates. @==@ on handles stays pure atom identity —
+  -- comparing handles compares the handles; reaching into the
+  -- side-table is a verb's job, like @bytesEqual@. Missing handle:
+  -- provisional Haskell error, same routing as @bytesEqual@ and @%b@
+  -- (unified error routing pending, §3.3/§7.3).
+  ("bytesCompare", [VAtom x, VAtom y]) -> do
+    m <- readTVar (rtsBytes rts)
+    case (Map.lookup x m, Map.lookup y m) of
+      (Just a, Just b) -> pure (VInt (case compare a b of
+                                       LT -> -1
+                                       EQ -> 0
+                                       GT -> 1))
+      _ -> error ("bytesCompare: unknown bytestring handle(s): " ++ x ++ ", " ++ y)
   -- §9 (issue #12, bullet 3): the identity invariant — bytes go in via
   -- @bytesBind@, the same codepoints come back out. The result is the
   -- exact shape @bytesBind@ consumed (a 'stringVal' cons-list), so

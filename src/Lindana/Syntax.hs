@@ -86,7 +86,11 @@ data Pat
                                 --   enforces); zero-or-more elements.
   deriving (Eq, Show)
 
-data Op = Add | Sub | Mul | Div | Eq | Neq
+-- | Binary operators. @Eq@/@Neq@ are well-defined for atoms (pure
+-- name identity, §9); the ordering ops @Lt@/@Gt@/@Le@/@Ge@ are
+-- numeric-only (issue #24) — atoms order nowhere, and an atom never
+-- orders against a number (the action layer rejects, §3.3).
+data Op = Add | Sub | Mul | Div | Eq | Neq | Lt | Gt | Le | Ge
   deriving (Eq, Show)
 
 data Expr
@@ -245,6 +249,10 @@ renderOp Mul = "*"
 renderOp Div = "/"
 renderOp Eq  = "=="
 renderOp Neq = "!="
+renderOp Lt  = "<"
+renderOp Gt  = ">"
+renderOp Le  = "<="
+renderOp Ge  = ">="
 
 indent2 :: String -> String
 indent2 = intercalate "\n" . map ("  " ++) . lines

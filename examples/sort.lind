@@ -1,0 +1,49 @@
+-- Issue #24: ordering comparisons are load-bearing here.
+--
+-- A bubble sort written entirely as Lindana machines — no loop
+-- constructs, only the §11.5 cons-list sugar and the ordering ops
+-- < <= > >= (each comparison yields 1/0, and `if` consumes it).
+-- A pass bubbles the list once, counting swaps; the Rev machine
+-- straightens the pass's output (cons-build is inherently reversed);
+-- a pass with zero swaps means sorted. The base cases live in `if`
+-- in the bodies, NOT in competing patterns — at the boundary both
+-- patterns would match and the §3.1 race picks a winner
+-- (the examples/brainfuck.lind lesson).
+--
+-- Also demonstrating the issue's bytestring note: bytesCompare is
+-- the "enriched version" of the ordering comparisons for bytestring
+-- CONTENTS — lexicographic, -1/0/1. == on handles is still only the
+-- handles.
+
+-- Bytestring contents order lexicographically; the handles themselves
+-- would only ever be == or != to each other. The sort is gated behind
+-- the verdict so the output order is deterministic (the binds are
+-- deferred effects — everything gates on their (Bytes, H) completions).
+: [bytesBind Left "apple"; bytesBind Right "apricot"; (Cmp,)]
+(Bytes, Left), (Bytes, Right), (Cmp,) :
+  if bytesCompare(Left, Right) < 0 then
+    [say "lex: %b < %b" Left Right; (SortedStart,)]
+  else
+    [say "lex: oops"; exit 1]
+(SortedStart,) : (Sort, [5, 3, 8, 1, 9, 2, 7, 4, 6])
+
+(Sort, l) : (Bubble, l, 0, [])
+
+(Bubble, [a, b | t], swaps, built) :
+  if a <= b then
+    (Bubble, [b | t], swaps, [a | built])
+  else
+    (Bubble, [a | t], swaps + 1, [b | built])
+
+(Bubble, [a], swaps, built) : (Rev, built, [a], swaps)
+(Bubble, [], swaps, built)  : (Rev, built, [], swaps)
+
+(Rev, [h | t], acc, swaps) : (Rev, t, [h | acc], swaps)
+(Rev, [], acc, swaps) :
+  if swaps == 0 then
+    (Show, acc)
+  else
+    (Sort, acc)
+
+(Show, [h | t]) : [say "%i" h; (Show, t)]
+(Show, []) : [say "sorted."; exit 0]
