@@ -6,6 +6,7 @@ module Lindana.RuntimeSpec (spec) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently, mapConcurrently_, async, wait)
 import Control.Concurrent.STM (atomically)
+import Control.Exception (evaluate)
 import qualified Data.Map.Strict as Map
 
 import Test.Hspec
@@ -229,6 +230,22 @@ spec = do
 
     it "evaluates arithmetic and variables" $ do
       evalExpr env (EBin Add (EVar "a") (EVar "b")) `shouldBe` VInt 42
+
+    it "orders numerics with < > <= >= (issue #24)" $ do
+      evalExpr env (EBin Lt (EVar "a") (EVar "b")) `shouldBe` VInt 1
+      evalExpr env (EBin Gt (EVar "a") (EVar "b")) `shouldBe` VInt 0
+      evalExpr env (EBin Le (EVar "a") (EVar "a")) `shouldBe` VInt 1
+      evalExpr env (EBin Ge (EVar "b") (EVar "a")) `shouldBe` VInt 1
+      evalExpr env (EBin Lt (EDouble 1.5) (EDouble 2.5)) `shouldBe` VDouble 1
+      evalExpr env (EBin Le (EDouble 2.5) (EDouble 1.5)) `shouldBe` VDouble 0
+
+    it "atoms order nowhere: < on two atoms is a Haskell error (issue #24)" $
+      evaluate (evalExpr env (EBin Lt (EAtom "A") (EAtom "B")))
+        `shouldThrow` anyErrorCall
+
+    it "an atom never orders against a number (issue #24)" $
+      evaluate (evalExpr env (EBin Lt (EAtom "A") (EInt 3)))
+        `shouldThrow` anyErrorCall
 
     it "splices a bound tuple into a constructed tuple (§4)" $ do
       evalExpr env (ETuple [ESplice (EVar "c"), EBin Add (EVar "a") (EVar "b")])

@@ -1,0 +1,42 @@
+Provisional comparison semantics (issue #24, branch runtime/comparisons)
+
+Flip-worthy calls made in §13.16. None are guarded; all are recorded.
+
+1. C-style precedence: ordering binds tighter than ==/!=. The
+   alternative (one flat level shared with equality, like Haskell's
+   infix 4) would make `a == 1 < 2` parse as `(a == 1) < 2`; the
+   C-style split gives `(a == (1 < 2))`. Renders always parenthesise
+   either way, so this only affects hand-written sources.
+
+2. Atoms order nowhere. The issue says atom equality (and therefore
+   inequality) is well-defined and that an atom never orders against
+   a number; it is silent on atom-vs-atom `<`. Implemented as an
+   error (the strict reading — the issue grants atoms only ==/!=;
+   content ordering is bytesCompare's job). The obvious flip:
+   lexicographic ordering of atom NAMES, which would be handy for
+   ordering modules/tags, and would sit comfortably next to
+   bytesCompare. Cheap to add later; expensive to remove.
+
+3. Ordering is same-kind numeric only: mixed int/double `<` is an
+   error, matching mixed arithmetic's strictness (§11.3, still open).
+   If §11.3 resolves toward promotion, comparisons should follow —
+   but promotion-for-comparison could also be granted independently
+   (comparing loses no precision the way arithmetic might), which
+   would make `1 < 1.5` legal before any mixed arithmetic is.
+
+4. bytesCompare returns -1/0/1 rather than four enriched predicates
+   (bytesLt/bytesGt/bytesLe/bytesGe). One builtin, four derivable
+   verdicts; the e2e test derives them by comparing against 0. Flip
+   if a call site pattern wants the predicate directly and the
+   `== 0` dance gets noisy.
+
+5. Double comparisons yield VDouble 1/0 (not VInt), consistent with
+   the pre-existing dblOp Eq/Neq equations. Truthiness treats
+   VDouble 0.0 as falsy, so `if 1.0 < 2.0 then … else …` works —
+   but note the §9 hazard that a comparison result's typeOf is
+   Double, not Int. A uniform VInt result would be a small flip.
+
+6. The bytewise lexicographic order of bytesCompare is UTF-8 order,
+   which equals codepoint order — deliberate (string ordering for
+   free), but if a future byte source ever stores non-UTF-8 bytes,
+   "lexicographic" quietly becomes bytewise-on-bytes for it.

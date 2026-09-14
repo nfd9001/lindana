@@ -85,7 +85,10 @@ Git history might be a better source-of-truth about recent progress until I've e
   `prelude.lind` + `no-prelude.lind` (§13.15) show the default
   Prelude import (gating on its `(Bytes, …)` completion tuples) and
   the pragma + explicit-import-with-hide-list opt-out;
-  `brainfuck.lind`
+  `sort.lind` (§13.16, issue #24) is a bubble sort as pure machines
+  (ordering comparisons are load-bearing: `<`/`<=` decide each swap,
+  base cases live in `if` bodies per the §13.12 race lesson) plus a
+  `bytesCompare` lexicographic demo; `brainfuck.lind`
   (§13.12) is a Brainfuck interpreter — zipper program and tape,
   jump-table brackets, CPS reversal via `!` splice — that runs the
   classic Hello World!; `throttle.lind` (§8.2) is a
@@ -132,7 +135,12 @@ sequences `[a; b]`, `if/then/else`, verbs
 (`say` with `%b` for bytestring handles, `exit`, `die`/`quit`,
 `sleep`, `lob`, `error`, `panic`, `bytesBind`, `bytesDestroy`),
 builtin calls (`rand`, `typeOf`, `atomize`, `atos`, `bytesEqual`,
-`bytesRead`),
+`bytesRead`, `bytesCompare`),
+ordering comparisons (§13.16, issue #24, provisional: `<` `>` `<=`
+`>=` on same-kind numerics — C-style precedence, tighter than `==`;
+atoms order nowhere, `==`/`!=` are their whole story; an atom never
+orders against a number; `bytesCompare(A, B)` is the bytestring's
+enriched lexicographic version, `-1`/`0`/`1`),
 initial-bag blocks, named bag blocks, the §9 bytestring side-table
 (opaque atom handles; `==` is pure atom identity, `bytesEqual`
 compares contents; binds emit a `(Bytes, H)` completion tuple;

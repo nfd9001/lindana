@@ -301,6 +301,23 @@ spec = do
       said `shouldBe` ["bytesRead round-trips; matched the \"Ok\" pattern"]
       rrExit rr `shouldBe` ExitSuccess
 
+  -- Issue #24: ordering comparisons, end-to-end through
+  -- parse → load → run. Ordering ops gate branches on numerics;
+  -- bytesCompare is the bytestring's enriched lexicographic version.
+  describe "comparisons e2e (issue #24)" $ do
+    it "ordering ops gate branches; bytesCompare orders handles lexicographically" $ do
+      l <- loadOk $ unlines
+        [ "{-# no-prelude #-}"
+        , ": [bytesBind A \"apple\"; bytesBind B \"apricot\"; (Go,)]"
+        , "(Bytes, A), (Bytes, B), (Go,) :"
+        , "  [ if bytesCompare(A, B) < 0 then say \"lex: apple first\" else say \"lex: oops\""
+        , "  ; if 2 + 2 >= 4 then say \"arith ok\" else say \"arith oops\""
+        , "  ; if 1 <= 0 then exit 1 else exit 0 ]"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      sort said `shouldBe` ["arith ok", "lex: apple first"]
+      rrExit rr `shouldBe` ExitSuccess
+
   -- §13.15 (issue #17 part 3): the default Prelude import. The loader
   -- prepends a synthetic one-shot ': import Prelude Nil []' to every
   -- top-level program (after the pragma check); the import effect

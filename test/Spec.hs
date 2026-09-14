@@ -17,7 +17,7 @@ import qualified Lindana.LoaderSpec as LoaderSpec
 import qualified Lindana.ModuleSpec as ModuleSpec
 import qualified Lindana.RuntimeSpec as RuntimeSpec
 import Lindana.Syntax
-  ( Action (..), Decl (..), Expr (..), Pat (..), PatElem (..)
+  ( Action (..), Decl (..), Expr (..), Op (..), Pat (..), PatElem (..)
   , ReadMode (..), Program (..), progDecls, renderProgram
   )
 import Text.Megaparsec.Error (errorBundlePretty)
@@ -225,6 +225,45 @@ main = hspec $ do
       it "round-trips the bytestring verbs" $
         roundTrips ": bytesBind Greeting [72, 105]\n(H,) : [bytesDestroy H; if bytesEqual(H, H) then die else die]"
           `shouldBe` True
+
+    -- Issue #24: ordering comparisons. C-style precedence — ordering
+    -- binds tighter than equality, additive tighter than both. Atoms
+    -- order nowhere (==/!= are their whole story; the runtime rejects,
+    -- this is just grammar). The renderer parenthesises every 'EBin',
+    -- so the rendered form always round-trips.
+    describe "comparison operators (issue #24)" $ do
+      it "parses <, >, <=, >= into EBin Lt/Gt/Le/Ge" $ do
+        p <- parseOk "(a, b) : (C, a < b, a > b, a <= b, a >= b)"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PVar "a", PVar "b"])]
+                   [Out (ETuple [EAtom "C"
+                                , EBin Lt (EVar "a") (EVar "b")
+                                , EBin Gt (EVar "a") (EVar "b")
+                                , EBin Le (EVar "a") (EVar "b")
+                                , EBin Ge (EVar "a") (EVar "b")])]]
+      it "ordering binds tighter than == (C-style precedence)" $ do
+        p <- parseOk "(a, b) : (C, a == b < 3)"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PVar "a", PVar "b"])]
+                   [Out (ETuple [EAtom "C"
+                                , EBin Eq (EVar "a")
+                                          (EBin Lt (EVar "b") (EInt 3))])]]
+      it "additive binds tighter than ordering" $ do
+        p <- parseOk "(a,) : (C, a + 1 <= b)"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PVar "a"])]
+                   [Out (ETuple [EAtom "C"
+                                , EBin Le (EBin Add (EVar "a") (EInt 1))
+                                          (EVar "b")])]]
+      it "round-trips" $
+        roundTrips "(a, b) : (C, a <= b, a >= 1 == b, a > b < 3)" `shouldBe` True
+      it "parses bytesCompare as a builtin call (§9, issue #24)" $ do
+        p <- parseOk "(H,) : (Out, bytesCompare(H, Word))"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PAtom "H"])]
+                   [Out (ETuple [EAtom "Out"
+                                , ECall "bytesCompare" [EAtom "H", EAtom "Word"]])]]
+        roundTrips "(H,) : (Out, bytesCompare(H, Word))" `shouldBe` True
 
     describe "import action (§13.13, issue #17)" $ do
       it "parses import with name handle, suffix handle, hide list" $ do

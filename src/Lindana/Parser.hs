@@ -76,7 +76,7 @@ reservedWords = Set.fromList
   , "say", "exit", "die", "quit", "sleep"
   , "lob", "error", "panic"
   , "rand", "typeOf", "atomize", "atos"
-  , "bytesBind", "bytesDestroy", "bytesEqual", "bytesRead"
+  , "bytesBind", "bytesDestroy", "bytesEqual", "bytesRead", "bytesCompare"
   , "import", "reroute"
   ]
 
@@ -308,10 +308,22 @@ patElemP = choice
 -- Expressions
 --------------------------------------------------------------------------------
 
+-- | Expression precedence, C-style (issue #24): comparisons bind
+-- tighter than equality, additive tighter than both, multiplicative
+-- tightest. Every level is left-associative; the renderer parenthesises
+-- every 'EBin' anyway, so the render always round-trips.
 exprP :: Parser Expr
-exprP = chainl1 addP (binop Eq "==" <|> binop Neq "!=")
+exprP = chainl1 cmpP (binop Eq "==" <|> binop Neq "!=")
   where
     binop o s = (\a b -> EBin o a b) <$ symbolT s
+
+cmpP :: Parser Expr
+cmpP = chainl1 addP (le <|> ge <|> lt <|> gt)
+  where
+    le = (\a b -> EBin Le a b) <$ symbolT "<="
+    ge = (\a b -> EBin Ge a b) <$ symbolT ">="
+    lt = (\a b -> EBin Lt a b) <$ symbolT "<"
+    gt = (\a b -> EBin Gt a b) <$ symbolT ">"
 
 addP :: Parser Expr
 addP = chainl1 mulP (plus <|> minus)
@@ -363,7 +375,7 @@ charExpr = do
 callP :: Parser Expr
 callP = choice
   [ rword (T.pack n) *> (ECall n <$> grouped '(' ')' (exprP `sepBy` symbolT ","))
-  | n <- ["rand", "typeOf", "atomize", "atos", "bytesEqual", "bytesRead"] :: [String]
+  | n <- ["rand", "typeOf", "atomize", "atos", "bytesEqual", "bytesRead", "bytesCompare"] :: [String]
   ]
 
 -- | Parenthesised expression: with no comma it is grouping, with a
