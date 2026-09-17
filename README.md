@@ -3,7 +3,9 @@
 A recreational programming language about race conditions. The design
 lives in [`agent-history/lindana-handover.md`](agent-history/lindana-handover.md)
 — the spec-of-record — and the implementation history lives alongside
-it in [`agent-history/`](agent-history/). `lindana <file.lind>` runs
+it in [`agent-history/`](agent-history/). The current state of the
+language is described in [`REFERENCE.md`](REFERENCE.md), a
+model-maintained language reference. `lindana <file.lind>` runs
 programs.
 
 # The Handwritten Part of the README
