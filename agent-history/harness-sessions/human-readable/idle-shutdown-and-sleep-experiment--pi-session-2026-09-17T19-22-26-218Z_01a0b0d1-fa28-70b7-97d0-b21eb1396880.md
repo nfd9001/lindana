@@ -1,0 +1,739 @@
+# Session dump: idle-shutdown and sleep experiment
+
+- **Session id:** 01a0b0d1-fa28-70b7-97d0-b21eb1396880
+- **Started:** 2026-09-17T19:22:26.218Z
+- **Source:** `/home/nfd/.pi/agent/sessions/--mnt-e-lindana--/2026-09-17T19-22-26-218Z_01a0b0d1-fa28-70b7-97d0-b21eb1396880.jsonl`
+- **Machine-readable copy:** `2026-09-17T19-22-26-218Z_01a0b0d1-fa28-70b7-97d0-b21eb1396880.jsonl` (in ../machine-readable/)
+
+---
+
+## 🧑 User
+
+We have tests, but the example code is not covered by the test suite. Some of the examples no longer run (and some of them, well, are supposed to). Go run all of them and take notes about which ones are working/aren't.
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Build is clean. Now let me run each example with a timeout and record results. First, let me check which ones are modules not meant to run standalone:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Now let me run every example. I'll use a timeout since some may block, and record exit codes:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+All examples ran. `throttle.lind` deadlocks — let me check the handover (§8.2) to see whether that's expected:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The handover (§13.x) says `throttle.lind` is *deliberately non-terminating* — deadlock is its documented outcome. Let me verify its true exit code and check what my runs left behind in the working tree:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+One more check per the project's own bar — `--parse` round-trip on every example:
+
+
+## 🤖 Assistant
+
+Full audit done. Every example was run via `stack exec lindana -- examples/<f>.lind` (fresh build, clean tree — scratch files are gitignored), plus the `--parse` round-trip the project bar requires.
+
+## ✅ Working (16 of 18)
+
+| Example | Result |
+|---|---|
+| `hello.lind` | `Hello world!`, exit 0 |
+| `toy.lind` | `Sum is 3`, exit 0 |
+| `bags.lind` | dispatch + payment + user Error handler output, exit 0 |
+| `brainfuck.lind` | `Hello World!` — the interpreter still works, exit 0 |
+| `bytes.lind` | all four checks print (equal contents, distinct atoms, round-trip) |
+| `chars.lind` | char sugar → `got 3` / `ok` / `Ok` |
+| `strings.lind` | `hello, world` / `Bye` / `ciao ☺` |
+| `lists.lind` | `sum is 14` |
+| `sort.lind` | lexicographic verdict + fully sorted 1–9 |
+| `prelude.lind` | `Lindana 0.1.0.0` + newline |
+| `no-prelude.lind` | explicit-import path works |
+| `imports.lind` | loads `greeter.lind`, `greeter says: hello, world` |
+| `reroute.lind` | loads `flaky.lind`, error captured: `archived a flaky error from Inbox` |
+| `files.lind` | writes + reads back `files-out.tmp` correctly (both freads behave as documented) |
+| `stdio.lind` | works with `examples/stdio-input.txt` (`you typed: hi there`, rerouted line lands in `stdio-out.tmp`) **and** doesn't crash on empty stdin (`you typed:` empty) |
+
+## ⚠️ Notes / caveats
+
+- **`throttle.lind`** — deadlocks immediately (`every machine is blocked…`, exit 1). This is *documented as intended*: handover §13.4 says "throttle.lind (§8.2) is deliberately non-terminating — the CLI now reports it as a deadlock when it goes fully idle." But as it stands it can never actually *demonstrate* throttling: there are no initial work tuples, no `(Tick,)` producer, and no way to feed it work externally. It's a deadlocking non-example, not a broken one — candidate for a header comment saying so, or for a driver that injects work.
+- **`greeter.lind`, `flaky.lind`** — these are *modules*, only meant to be loaded by `imports.lind` / `reroute.lind`. Run standalone they deadlock (exit 1), which is fine, but their header comments never say "not runnable directly." Cheap fix: one line each.
+
+## `--parse` round-trip
+
+All 18 examples parse and re-render byte-identically. Zero failures.
+
+**Bottom line: nothing is broken.** The only "supposed to not run" cases are the two modules and `throttle.lind`, and all three fail in the documented deadlock-detect way rather than misbehaving. The obvious follow-up slice would be a tiny docs PR: add "module — loaded by X" comments to `greeter`/`flaky`, and either a "requires a driver / deliberately idle" note to `throttle` or an actual demo driver for it. Want me to do that, or record these notes in the handover?
+
+
+## 🧑 User
+
+I guess I was surprised by the error call in `bags`, rerunning it blindly.
+
+> 🔧 `read`
+
+## 🤖 Assistant
+
+Right — that's the example doing exactly what its header advertises, but I agree the output reads like a crash if you're not primed. Walkthrough of what happened:
+
+- The `Workers` bag's `(Done, x)` machine pays the job (`job paid: 30`), then **deliberately** calls `error ("late", x)` — that's the whole point of the example: showing that a user-declared `Error { ... }` block fully replaces the §6.4 default `(c!) : panic c` machine.
+- The error tuple lands in the `Error` bag as `(Error, "late", 30)`, and the handler uses §11.1 rest capture (`(Error, rest!)`) and prints it with `%a` — raw structural rendering. `108, 97, 116, 101` is just `"late"` as a codepoint cons-list, so you get that wall of numbers.
+- Exit code is still 0; nothing failed.
+
+So: working as intended, but two legitimate gripes for a blind rerunner:
+
+1. **Nothing in the output says the error is the demo.** It looks like something broke. A comment in the file doesn't help you mid-run.
+2. **`%a` on a tuple containing a string is unreadable** unless you enjoy decoding ASCII by hand.
+
+If you want, I can tweak `bags.lind` so the line is unmistakably deliberate — e.g. have the handler say `error handler caught: late 30` by destructuring `(Error, msg, x)` instead of `rest!`… but that would stop exercising §11.1 rest capture, which the header claims is a feature of the example. Alternative that keeps `rest!`: keep the structural dump but reword to `handled by user Error handler: %a` so a rerunner knows it's supposed to be there.
+
+My lean: keep `rest!` (it's the example's selling point), reword the message. Want me to make that change, or leave it as a recorded quirk?
+
+
+## 🧑 User
+
+Maybe we can switch that message out with `Error handling demonstration: handler caught: `. Give it a shot, run it, and I'll let you know if I want to send a PR.
+
+> 🔧 `edit`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Done. The change in `examples/bags.lind`:
+
+```lindana
+(Error, rest!) : [say "Error handling demonstration: handler caught: %a" rest; die]
+```
+
+Output now:
+
+```
+job paid: 30
+Error handling demonstration: handler caught: ((108, (97, (116, (101, Nil)))), 30)
+exit: 0
+```
+
+Verified per the merge bar: CLI run green, exit 0, and `--parse` round-trip is byte-identical.
+
+The codepoint dump stays, since `rest!` is a tuple and `%a` is the only honest way to print it — but the line now announces itself as the demo rather than looking like a crash. If it still feels too noisy, the fallback is destructuring `(Error, msg, x)` with `%s %i` (readable, but drops the §11.1 rest-capture showcase).
+
+Your call on the PR. If you want it, the convention would be branch `examples/bags-error-message`, commit subject `Examples: bags.lind error-handler message says it's a demo (§13.x)`, and — since it's docs-adjacent but touches an example — arguably worth a one-line §13.x note in the handover in the same PR.
+
+
+## 🧑 User
+
+Funny sidebar idea (don't commit it, but let's try it out): catchall handler `(Error, rest!)` and a tagged error handler `(Error, Demo, (s, n))`. Catchall then checks its block for if the head of `rest` is `Demo`, in which case it pushes the tuple back to the bag and blocks for a few millis.
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Fun idea — a hand-rolled priority protocol where the catchall politely puts Demo-tagged errors back and lets the specialist grab them. Let me check what the language gives us for "head of rest" first:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The idea: `Error` gets a specialist `(Error, Demo, (s, n))` and a catchall `(Error, rest!)` — and since both match Demo-tagged errors (§3.1 race), the catchall is supposed to bow out: check if it grabbed a Demo, and if so put it back and sleep a few ms so the specialist can win the re-grab. Let me check what the language actually gives us for that "head of rest" check:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Fun one. Let me trace the mechanics before writing it — a couple of subtleties decide whether this works:
+
+1. `rest` arrives via splice, so `(HeadCheck, rest!)` would *flatten* — I need `(HeadCheck, rest)` to keep the payload nested.
+2. There's no `head` builtin and `==` on lists is a type error — but the head can be bound *as a variable* by a nested pattern `(h, r!)` and then compared with `==` (atom identity works there). So the check *can* happen in the catchall's block, just one delegation deep.
+3. The danger: when the catchall pushes the tuple back, the catchall itself is the specialist's competitor for the re-grab — infinite defer loop unless the sleep actually delays the catchall's re-arm. Let me check how `sleep` interacts with re-arming:
+
+> 🔧 `bash`
+> 🔧 `write`
+
+## 🤖 Assistant
+
+Key discovery in `Machine.hs` (lines 890–910, 973): `sleep` runs in the **global effect-runner**, not the machine's thread — a machine that doesn't `die` re-arms *immediately* after committing its writes. So "push back and sleep" may not actually stop the catchall from winning its own pushback race. Which means your design might livelock — very much on brand. Let's find out. Writing the experiment:
+
+> 🔧 `bash`
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Diagnosis of that deadlock: the `HeadCheck` machine **died** serving its first dispatch (the Demo defer), so when the untagged error's `HeadCheck` tuple arrived, nobody was home. Machines are one-shot across `die`. Also — the specialist won the tagged error, but I can't tell from the output whether it won the *initial* race or the *re-grab after deferral*. Fixing both: HeadCheck must re-arm, the untagged path (guaranteed last in this choreography) ends with `exit 0`, and I'll instrument the defer path so we can see the protocol actually happening:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Same deadlock, and the defer line *never* prints — so the specialist is winning the initial race every time, and then something downstream stalls. Let me instrument the chain to find where it stops:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The untagged error is emitted but the catchall never wakes. Let me isolate the catchall path — strip the tagged error entirely:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+There it is — I suspect my own splice bug: in the catchall's dispatch I wrote `(HeadCheck, rest!)` — the `!` *splices*, so the tuple lands as `(HeadCheck, "late", 30)` (3 elements) and the 2-slot pattern `(HeadCheck, (h, r!))` can never match it. Checking:
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Confirmed — line 34 still splices. Fixing the dispatch to keep `rest` nested:
+
+> 🔧 `bash`
+> 🔧 `read`
+
+## 🤖 Assistant
+
+The full pipeline works now — but notice the defer line *still* never printed: the specialist wins the initial race every time, so the pushback protocol is never exercised. Let me force the catchall to win one: I'll gate the specialist behind a tuple that only lands right before the error is raised, so the catchall (armed since startup) should be the elder waiter:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Specialist still wins — even as the *younger* waiter. That smells like deterministic machine ordering in the runtime rather than scheduler noise. Checking how the runtime picks among competing machines:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The loop shows each machine is its own thread doing `atomically (matchJoinSTM …)` with plain `retry` — winner is STM wakeup order, no declared priority. Empirically the specialist is 8-for-8, which smells like watcher-registration order (last watcher woken first, LIFO). Cheap test: swap declaration order and see if the winner flips:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Declaration order doesn't matter either. New hypothesis for a *deterministic* choreography instead of fighting the race: keep the specialist **gateless** when the tagged error first lands — then the catchall is the *only* competitor, wins for sure, defers; a relay machine arms the specialist one beat later, and it wins the re-grab (it's 8-for-8 in races so far):
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The specialist wins even when gateless — the relay's `SpecialistGo` commit consistently beats the catchall's wakeup. But this surfaced the *real* finding, and it's a good one: **`sleep` can't implement "block for a few millis" for a machine's own re-arm.** It's a deferred effect on the global runner (`EffSleep -> threadDelay` in `runBundle`) — the machine thread re-arms *immediately* and will instantly re-grab whatever it just pushed back. A true nap needs a completion-tuple gate (`(Bytes, H)`-style). Let me check the `in` action syntax and build the honest version of your design:
+
+> 🔧 `write`
+
+## 🤖 Assistant
+
+No `in`-as-action — take-clauses are join-side. So the token discipline goes: the catchall **consumes the arm-token as a join clause** on every grab, and the nap re-arms it via a `bytesBind` completion relay (a *true* runner-side delay, unlike `sleep`). Building v7:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Still specialist-first — the `GateGo` relay (a younger thread) consistently beats the older blocked catchall to the wakeup. Fine: let's make the specialist's arming gate a **real** runner-side delay (`sleep` + `bytesBind` completion), guaranteeing the catchall a wide-open window on the tagged error. Prediction: the defer loop cycles until the specialist arms, then the specialist breaks the loop:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The defer branch finally fires — and it's looping. Let me see the full run and how long it actually takes:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+11,212 defer rounds, killed at 60s — the specialist never wins a re-grab even though its gate has been up since +25ms. Something's off with my model. Instrumenting the gate relay to see if `SpecialistGo` ever actually lands:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The gate goes up, yet the specialist never touches a tuple that sits unowned for 5ms at a time, 842 times. My model of who-wakes-when is wrong somewhere — time to read `matchJoinSTM` instead of theorizing:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+One TVar per bag, textbook STM. Let me isolate: does the specialist machine even fire in a minimal bag where its tuple and gate are present from the start?
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Specialist works fine in isolation. I've been theorizing too long — let me actually read what v8 looks like after my sed/python edits:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+File's correct. Time to bisect empirically: v10 removes the `rd(SpecialistGo,)` gate so the specialist is armed from t0 and competes on every re-grab. If it *still* never wins a re-grab, parked-wakeup vs. hot-machine is systematically biased; if it wins, the gate is somehow the culprit:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+v10: ungated specialist wins instantly (0 naps). So a parked, gated specialist never commits even against *no competition at all* during the tokenless windows. Cleanest bisection: v13 — **no catchall loop at all**. Just the gated specialist and a producer. If the tuple sits in the bag for 25ms with the gate up and the specialist still doesn't take it, we've isolated a real interaction bug:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+v13 works — so the gated specialist is fine *in isolation*; the loop's churn is the culprit. Next bisection: v17 replaces the token/nap machinery with a minimal **hot pushback loop** (two machines ping-ponging the tuple) plus the gated specialist. This tests one question: does a parked machine ever win a re-grab against machines that are already running?
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+v17 confirms it: the specialist **never** takes the tuple back from a hot ping-pong — parked machines lose every re-grab to already-running ones. But v8 is weirder: during the 5ms tokenless windows there's *no* hot machine, the tuple just sits there, and the specialist still doesn't grab. I've exhausted black-box theories — instrumenting the runtime loop (scratch patch, reverted after) to see whether the specialist's parked transaction ever even re-evaluates:
+
+> 🔧 `bash`
+> 🔧 `edit`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `edit`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The catchall and HeadCheck loop 266×, but the specialist **never appears in the trace at all** — not even a park. Let me see its whole lifecycle:
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+`MATCH` traces work but `PARK` never fires — my in-STM trace is unreliable. Let me trace at thread *spawn* instead — plain IO, no STM subtleties — to check whether the specialist's thread even exists:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+All four spawn. So the specialist is alive and looping — it must be parking. Let me re-check the PARK traces with the current build:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+807 matches, zero parks — yet HeadCheck must park between its 266 matches. The `PARK` trace branch itself must be broken. Testing the trace in the simplest possible park:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The deadlock message proves the `(Never,)` machine sat in `retry` — yet zero PARK traces. My patch itself must be defective. Looking at it:
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Found the flaw in my instrumentation: `seq (trace msg ()) retry` — GHC can dead-code-eliminate a `seq` on a `()`-typed thunk feeding into `retry`, but the `Just` branch's trace *feeds the real continuation* so it survives. Fix: make the trace wrap the continuation itself — `trace msg retry` — so the print can't be skipped:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The specialist parks **634 times** — alive, woken constantly, and *never once* matching. My timeline model is wrong. Let me look at what's actually in the bag each time it parks:
+
+> 🔧 `edit`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+**FOUND IT.** Look at the bag dumps — the payload gains one `(((…)))` nesting level *per defer cycle*. The rest-capture `r!` always binds a **tuple** — a one-element capture is a 1-tuple — and re-emitting `r` *unspliced* nests it. So each round-trip through the catchall wraps the payload once: `(Error, Demo, ("late",30))` → `(Error, Demo, (("late",30)))` → … and the specialist's `(s, n)` shape stops existing after cycle 1. The tuple the specialist is waiting for *never exists again*. The faithful round-trip needs the splice: `r!` unwraps exactly the wrap that capture added. Capture-then-splice is identity; capture-then-plain-emit is +1 wrap per cycle. That also explains v17's ping-pong. Fixing the defer branch:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+**The full protocol works, deterministically, all three runs.** Now let me revert my scratch instrumentation from `Machine.hs` and confirm the tree is back to a clean state (plus the test suite, since I touched the runtime even temporarily):
+
+
+## 🤖 Assistant
+
+Runtime reverted, 208 tests green, and the only modified tracked file is `examples/bags.lind` (your pending message tweak). Everything experimental lives in `/tmp`. Here's the final working version — `/tmp/bags-tagged18.lind` — and what the sidebar taught us:
+
+```
+job paid: 30
+(catchall deferred a Demo error, napping)
+specialist: late 30
+catchall: ((108, (97, (116, (101, Nil)))), (99))
+```
+
+Deterministic across every run: catchall grabs the Demo-tagged error first (the specialist is gateless at that moment), recognizes it, defers, naps; the specialist — armed via a delayed gate — wins the re-grab; then it hands the catchall an untagged error to finish. Exit 0.
+
+## What your design needed to become true
+
+1. **"Checks its block for if the head of rest is Demo"** — there's no `head` builtin and `==` on lists is a type error, so the check can't be an `if` in the catchall's own body. It works one delegation deep: the catchall hands `rest` to a `HeadCheck` machine whose nested pattern `(HeadCheck, (h, r!))` binds the head as a *value*, guarded by `typeOf(h) == Atom` (else-branch handles list-headed rests), then `h == Demo` — atom name identity, in-block, as requested.
+
+2. **"Pushes it back and blocks for a few millis"** — the interesting failure. `sleep` throttles the *effect runner*, not the machine: the machine re-arms instantly and re-grabs its own pushback (v17 was a 4s busy livelock proving it). A real nap needs token discipline — the catchall consumes an `(CatchallArmed,)` token on every grab and gets it re-armed via a `bytesBind` completion relay, which *is* a genuine runner-side delay. The `sleep 5` is still in there but it's decorative; the token does the work.
+
+3. **The best bug of the day** — the defer loop was silently mutating the tuple. Rest-capture `r!` *always* binds a tuple (a one-element capture is a 1-tuple), so re-emitting `r` unspliced wraps the payload once per cycle: `(Error, Demo, ("late",30))` → `(Error, Demo, (("late",30)))` → …. After one round-trip, the specialist's `(s, n)` pattern could never match again. I only found it by instrumenting the runtime and watching the bag dumps grow parens. The fix is poetic: `lob Error (Error, Demo, r!)` — *splice is the exact inverse of capture*, so capture-then-splice round-trips. That feels like a §11-worthy note: **a rest capture is not an identity on re-emit; unspliced re-emission is lossy.**
+
+4. Misc: the specialist beat the catchall in every contested race (13/13 across variants) — but that's GHC scheduler detail, not language semantics, so the protocol is now race-*robust* anyway: even if the catchall wins a re-grab, it just defers again, and the tuple keeps its shape under the splice fix.
+
+Nothing committed; `bags.lind`'s pending one-line message change is untouched and still awaiting your PR verdict. Want me to save the final experiment file into the repo as an untracked reference (e.g. `agent-history/`), or leave it all in `/tmp`?
+
+
+## 🧑 User
+
+Let's put a writeup/a copy of this (or any interesting versions of) this experiment in a little path under the messageboard. This is also directly relevant per [this comment](https://github.com/nfd9001/lindana/pull/29#issuecomment-5718142811): we want `sleep` to actually be useful. (For instance: it should be able to implement sleepsort.) Perhaps make a relevant note about this in the handover doc so your successors don't miss that.
+
+> 🔧 `bash`
+> 🔧 `fetch_content`
+> 🔧 `get_search_content`
+> 🔧 `get_search_content`
+> 🔧 `get_search_content`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The HTML slice doesn't contain the comment yet — easier to use `gh`:
+
+
+## 🧑 User
+
+Why not just get that with `gh`?
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Fair — that was clumsy of me: I fetched the HTML page first (332KB, comment body not even in the first slice) when `gh api repos/.../issues/comments/5718142811` had it in one line. Lesson absorbed: on this repo, `gh` first.
+
+Also worth noting: the comment itself doesn't mention `sleep` — it's about flipping note 8 in the messageboard (per-machine vs per-bag fd modelling) and "what should race and what should synchronize." Let me read that note for context before writing anything:
+
+> 🔧 `read`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Context confirmed. Messageboard note 8 is: "A blocked `fread Stdin` parks the GLOBAL effect runner… every other queued effect — a `sleep`, a concurrent `fwrite` — waits behind it" — and my experiment found the mirror-image problem: `sleep` parks the runner but does nothing to the machine, so it can't order *machines* at all. Sleepsort is the perfect acceptance test for that — let me write one and demonstrate the failure concretely, so the archive shows evidence rather than assertion:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Unexpected: only `5` printed, then a deadlock report — even more broken than predicted. Before archiving, let me understand exactly what happened. One declared machine = one thread, so five tuples but a single `(N, n)` machine; let me check how the run ends:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Now I can explain the sleepsort autopsy precisely — and it uncovered a second finding. One declared machine = one thread: it grabbed `(N,5)`, queued `[sleep 50; say "5"]`, and died. All machines dead → main proceeds to shutdown while the runner is still mid-`threadDelay`… and the run died with a *false deadlock report* (the RTS's blocked-STM check can't see a pending timer wakeup). Let me probe whether it's a race the deadlock check wins during long sleeps:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Deterministic at every multiplier — not a timing race. Quick control to see whether `sleep` is even implicated in the false deadlock, or whether it's the "all machines dead, tuples unmatched" shape:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The no-sleep control **also** deadlocks — so this false deadlock is *not* about sleep at all; it's about the shape "machine queues a final bundle and dies." Let me isolate that precisely:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+**Busted — the real culprit.** parktest's spawn trace showed it earlier: `SPAWN Error :: (c!)`. Programs with **no Error block** get the §6.4 *default* `(c!) : panic c` machine — an immortal looping thread. It parks forever, `live` never reaches 0, and the RTS aborts everything as a "deadlock." That's why C1/C2 false-deadlock while `bags.lind` (declares `Error {…}`) and `hello.lind` (exit path) exit clean. Verifying:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Theory confirmed (C4 exits 0). One more corollary logged. Now let me check the handover's §11.7 and the §13 tail so the new note fits the doc's numbering and cross-reference style:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `write`
+
+## 🤖 Assistant
+
+§11 ends at 11, so the shutdown hazard becomes item 12. Writing the archive now — writeup first:
+
+> 🔧 `write`
+
+## 🤖 Assistant
+
+Now the three runnable artifacts, with archive-appropriate headers:
+
+> 🔧 `write`
+> 🔧 `write`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Verify all three archived artifacts behave as documented:
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+All three match their documentation. Now the handover — new §11.12 (the shutdown hazard), a reinforcement clause on §11.7, and §13.21:
+
+> 🔧 `edit`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Everything's in place. Summary of what landed (working tree only — nothing committed, consistent with the pending `bags.lind` PR decision):
+
+## `agent-history/messageboard/sleep-experiment/` (new)
+
+- **`README.txt`** — the writeup, five findings: (1) `sleep` throttles the runner, not the machine — with **sleepsort as the acceptance test** for any §11.7 flip ("if a flip can't make `sleepsort-not.lind` print `1 1 3 4 5`, it didn't fix `sleep`"), tied explicitly to the PR #29 comment and flip #8 of `provisional-std-fd-semantics.txt`; (2) rest-capture lossiness (capture-then-splice is identity, plain re-emit wraps per cycle); (3) the working defer protocol (pattern-bound head check + token/completion-gate nap); (4) parked machines starve against hot ones; (5) the **default-Error-machine shutdown hazard**.
+- **`tagged-error-defer.lind`** — the working protocol, verified: parse ✓, deterministic output ✓, exit 0 ✓.
+- **`defer-livelock.lind`** — the deliberate busy-livelock repro (verified: spins, no progress).
+- **`sleepsort-not.lind`** — the yardstick, with the three-layer autopsy in its header (per-declaration threads, FIFO runner, false deadlock).
+
+## `agent-history/lindana-handover.md`
+
+- **New §11.12** — the shutdown hazard as an open item (default `(c!)` machine is immortal → all-`die` programs without an Error block or `exit` report a false deadlock, exit 1).
+- **§11.7 sharpened** — sleep's uselessness for self-delay, sleepsort acceptance test, PR #29 cross-reference.
+- **New §13.21** — the full experiment record in house style, plus a **"Next"** section: the §11.12 fix as the small actionable slice, the §11.7 flip as the big one, and the REFERENCE.md rest-capture sentence as a rider.
+
+One honest caveat recorded in §13.21: the runtime instrumentation I used to diagnose finding 2 was temporary and reverted (`git checkout src/Lindana/Machine.hs`), suite re-run green (208) before and after.
+
+Natural bundling when you're ready: this could be one `docs/sleep-experiment` PR (messageboard + handover + §11.12), optionally carrying the `bags.lind` message tweak — or the tweak ships separately. And if you want, the §11.12 fix itself is genuinely small — say the word and I'll take it as its own slice.
+
+
+## 🧑 User
+
+Cool. Sounds like two PRs: the example tweak + the experiment (docs/driving), and one for the 11.12 fix. Go for it.
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Two slices it is. Let me start by grounding the §11.12 fix in the actual code — how the loader installs the default Error machine, what `MachineDef` looks like, and what tests cover this:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+`MachineDef` is a 4-field record with only three construction sites in `src` plus one test helper — a flag field is tractable. My design: `machIdle` (doesn't keep the program alive), exempt from `rtsLive`, plus a drain-guard in the shutdown check so a pending error tuple still gets its guaranteed panic (no shutdown race). Let me check how module imports handle the live-count arithmetic and whether they install default machines too:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+`lowerModule` reuses `loadProgramWith`, so modules bring idle default machines too — `installModule`'s `+ (length ms - 1)` credit must exempt them or live leaks. Now let me check how existing tests drive the loader so the regression tests match house style:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+House style understood. Before the two PRs, one convention check — "full test suite green (randomized order)":
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+No randomization in the harness — hspec takes `--randomize` on the CLI; I'll use it for the bar. Starting **PR A (`docs/driving`)**:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `write`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+PR A is up: [#36](https://github.com/nfd9001/lindana/pull/36). Now **PR B (`runtime/idle-shutdown`)**, stacked on it:
+
+> 🔧 `edit`
+> 🔧 `read`
+> 🔧 `edit`
+> 🔧 `bash`
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+The file has literal `\"` escapes that tripped my matching. Using the unique `machJoin` line instead:
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Now the Loader — three construction sites:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `edit`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Now Machine.hs — the runtime side. First the decLive guard and rtsLive comment:
+
+> 🔧 `edit`
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Now the shutdown check and live init in `runLoaded`:
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+I wrote a nonexistent `bagTVar'` — fixing the drain check to read the bag properly:
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Now `installModule`'s live credit and the import-repeat path:
+
+> 🔧 `edit`
+> 🔧 `edit`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Add a line to the Machine.hs module header documenting the §11.12 resolution, then build:
+
+> 🔧 `edit`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Builds clean. Now the test helper fix and regression tests:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+`echo.lind` parks its user machines, so for the module-path regression I'll add a minimal fixture `quiet.lind` whose only machine is a one-shot `die`. Now the test edits — MachineSpec helper + two tests:
+
+> 🔧 `bash`
+> 🔧 `edit`
+> 🔧 `write`
+
+## 🤖 Assistant
+
+Now the module fixture and its ModuleSpec test:
+
+> 🔧 `bash`
+> 🔧 `edit`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Some tests construct `MachineDef` positionally. Finding and fixing all of them:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Clean build. Running the full suite, randomized per the house bar:
+
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+T2's panic hook never fired. Let me reproduce via the CLI directly:
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Found it — my assertion bug, not a runtime bug: the CLI shows the panic message renders the payload as *codepoints* — `(Error, (98, (111, …)), 7)` — so the literal substring `"boom"` never appears. The panic fires correctly. Fixing the assertion:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Green. Now verify the fix against the original repro shapes via CLI:
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+All three correct — genuine deadlocks still report, false ones gone. Now docs travel with code — update the messageboard README and handover:
+
+> 🔧 `edit`
+> 🔧 `bash`
+> 🔧 `bash`
+> 🔧 `write`
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Both PRs are open, stacked so #37's handover edits layer cleanly on #36's:
+
+## PR #36 — [`docs/driving`](https://github.com/nfd9001/lindana/pull/36) (`docs/driving` → `main`)
+- `examples/bags.lind`: error-handler line now announces itself as the demo (rest-capture showcase kept).
+- `agent-history/messageboard/sleep-experiment/`: `README.txt` writeup + the three runnable artifacts (`tagged-error-defer`, `defer-livelock`, `sleepsort-not`), all CLI-verified against their documented behavior.
+- Handover: §13.21 experiment record, §11.7 sharpened (sleepsort = the §11.7 acceptance test, PR #29 cross-ref), §11.12 opened.
+
+## PR #37 — [`runtime/idle-shutdown`](https://github.com/nfd9001/lindana/pull/37) (`runtime/idle-shutdown` → `docs/driving`)
+- `MachineDef.machIdle`: only the default Error machine is idle-exempt — not counted in `rtsLive`, never decremented, and the module-import credit skips it (`+ (k′ − 1)`, still settling the §13.13 slot).
+- **The drain guard** — the subtle part: exemption alone was genuinely racy (a final error tuple could be silently dropped instead of panicking, since the dying machine's `decLive` and the parked default's grab are disjoint transactions). The run-alive check now waits for idle bags to drain, so clean exit and guaranteed panic are both deterministic.
+- Tests: `MachineSpec` shutdown block (clean all-die exit; guaranteed panic at shutdown) + `ModuleSpec` case via the new `test/modules/quiet.lind` fixture. Both timed out before the fix.
+- Bar met: 211 cases green with `--randomize`, zero `-Wall` warnings; CLI-verified — the C1 repro and `sleepsort-not.lind` now exit 0, and `throttle.lind`'s *genuine* deadlock still reports exit 1.
+
+Both PR bodies are file-based (per house rules), each with a **Next** section — the big one being the §11.7 runner-scope flip, for which sleepsort now sits in the messageboard as a runnable yardstick. Agents stop here; over to you for the merges.
+
+
+## 🧑 User
+
+Add the session dump step to #37 too.
+
+> 🔧 `read`
+> 🔧 `bash`
