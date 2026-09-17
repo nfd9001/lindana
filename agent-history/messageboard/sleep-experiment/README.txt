@@ -28,12 +28,21 @@ else's thread. Consequences:
     at full speed. See `defer-livelock.lind` (a 100% CPU spin; 11k
     defer rounds in a minute; no output progress).
   * Sleepsort is impossible as written: see `sleepsort-not.lind`.
-    Every `[sleep n; say n]` bundle drains FIFO through the one
-    runner, one fully live at a time, so output order is queue order,
-    not sleep order. (That file also only processes ONE tuple —
-    threads are spawned per DECLARED machine, not per tuple — and
-    then false-deadlocks; see finding 4. The layers are untangled
-    in the file's header.)
+    The input is a list of length l; a worker unwinds it into l
+    (N, n) tuples while counting, and the countdown gate (Counter, r)
+    meters out exactly l grabs — each grab re-arms the countdown,
+    then sleeps proportional to n and says. The countdown's LAST
+    token is the exception: its holder emits the terminal
+    (Bytes, Last) gate AFTER its own work (a plain write would hoist
+    to grab time — see the corollary below), and (Bytes, Last) closes
+    the program, so exit cannot precede the last claimer's say. The
+    design asks the runtime for l CONCURRENT instances of N, each
+    delaying in its own thread — under that, classic sleepsort
+    semantics give 1 1 3 4 5. Today's runtime provides one re-arming
+    thread per DECLARATION, and its bundles drain FIFO through the
+    single global effect runner, one fully live at a time — so the
+    sleeps are honored but contribute nothing to order, and the
+    output is grab order (5 1 4 1 3, deterministically, exit 0).
   * ACCEPTANCE TEST for any §11.7 flip (per-machine or per-bag
     runners, per PR #29's comment): if the flip can't make a
     sleepsort of `3 1 4 1 5` print `1 1 3 4 5`, it didn't fix
@@ -44,6 +53,46 @@ completion tuple that the runner emits after its work. `sleep 5` +
 `bytesBind H [1]` → the `(Bytes, H)` gate lands a true 5ms later,
 because it is the runner's own post-sleep write. The tag
 `tagged-error-defer.lind` uses exactly this as the nap mechanism.
+
+Corollary — sequencing does NOT order writes against effects (as
+shipped). The §5 sugar story (an implicit continuation chaining the
+steps) is not what ships: `interpretActions` folds the whole action
+list in ONE transaction — tuple writes (`out`/`lob`/`error`) execute
+immediately, in-transaction, wherever they sit in the list, while
+effects defer into the bundle. So `[sleep 100; (Done,)]` lands
+`(Done,)` at match time; list position cannot express "emit after
+the delay". What IS enforced: effects within one machine's bundle
+are FIFO (machine-local ordering), and bundles are globally FIFO
+(single runner). The only tuple that can land after a delay today is
+a completion tuple emitted by an effect (the gate idiom) — which is
+why sleepsort-not.lind's terminal token is a `bytesBind` gate, not a
+plain write.
+
+THE INTENDED MODEL (recorded as a design position, provisional,
+flip-worthy): sequencing SHOULD enforce ordering — the implicit
+continuation is real semantics, not sugar: an action list is a chain
+of steps, each step its own transaction, and a machine's later steps
+do not run until its earlier effects have completed. Motivated by
+this experiment (sleepsort's terminal token should be writable as
+`[sleep n * 10; say "%i" n; (Counter, 0)]` — list position meaning
+what it says) and by the PR #29 comment's "what should race and what
+should synchronize": a write and a later effect in the same list are
+synchronized, not racing.
+
+Implementation sketch, staying in the language's existing idioms:
+split the action list at irrevocable effects into segments; segment 1
+commits in the match transaction (writes + first effect run, atomic
+as today); when the runner finishes a segment's effects it emits that
+machine's continuation gate — the (Bytes, H) mechanism generalized
+into the §5 AContN machinery the handover always said "falls out of
+the loop re-arming" — and the next segment's transaction consumes it
+with the environment carried along. Machine-local ordering then holds
+by construction; whether effect ordering is BAG-local (all machines
+in a bag serialize) or machine-local is exactly the §11.7 flip —
+per-bag runners would make it bag-local, per-machine runners
+machine-local, and sleepsort-not.lind (which wants l instances
+delaying concurrently, not serialized) is the test for how much
+serialization is too much.
 
 --------------------------------------------------------------------
 FINDING 2: rest capture is LOSSY on unspliced re-emit.

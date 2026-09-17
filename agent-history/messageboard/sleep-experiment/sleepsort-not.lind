@@ -1,34 +1,53 @@
--- SLEEPSORT (the non-working kind) — the acceptance-test yardstick
--- for any §11.7 effect-runner flip (see README.txt, finding 1).
+-- SLEEPSORT — the acceptance-test yardstick for any §11.7
+-- effect-runner flip (see README.txt, finding 1).
 --
--- Classic sleepsort: one machine per number sleeps proportional to
--- the number, then prints; the sleeps order the output. Three things
--- stop that here, in increasing subtlety:
+-- The shape (v3): the input is a list of length l; a worker unwinds
+-- it into l (N, n) tuples while counting, and hands the count to the
+-- countdown gate. Each grab of N consumes one number and one counter
+-- token, immediately re-arms the countdown ((Counter, r - 1)), then
+-- sleeps proportional to n and says. The countdown's LAST token is
+-- the exception: the (Counter, 1) holder re-arms nobody — instead it
+-- emits the terminal (Bytes, Last) gate AFTER its own sleep and say
+-- (a bytesBind completion is the only tuple that can land after a
+-- delay — plain writes commit in-transaction), and (Bytes, Last)
+-- closes the program. Exit therefore cannot precede the last
+-- claimer's work.
 --
---   1. Threads are spawned per DECLARED machine, not per tuple: the
---      single (N, n) machine processes ONE tuple (outSTM prepends, so
---      the first match is the LAST-loaded initial tuple) and dies.
---      A re-arming (no-die) variant processes all five — in grab
---      order, still not sorted order.
---   2. `sleep` delays the single global effect runner, not the
---      machine: every [sleep n*10; say n] bundle drains FIFO, one
---      fully live at a time, so the sleep contributes nothing to
---      ordering. Bundle queue order = grab order = output order.
---   3. After the machine dies, the run false-deadlocks (exit 1,
---      the §1 deadlock message) — NOT because of sleep: the default
---      §6.4 Error machine (installed because this file declares no
---      Error block) is an immortal parked thread, and the RTS's
---      blocked-thread check fires. Finding 5 in README.txt; a
---      control with an explicit `Error { }` appended exits cleanly.
+-- What SHOULD happen (classic sleepsort): the l grabs sleep
+-- concurrently, shortest first — output 1 1 3 4 5. That needs l
+-- CONCURRENT instances of N, each delaying in its own thread; the
+-- design above is written so that l instances (not l declarations)
+-- are the only thing it asks of the runtime.
 --
--- Observed: prints `5`, then the deadlock message, exit 1 —
--- deterministically. If a runner flip makes THIS file print
--- `1 1 3 4 5`, sleep has become actually useful.
+-- What DOES happen today (deterministic): one declaration = one
+-- re-arming thread, and its [sleep n * 10; say n] bundles drain FIFO
+-- through the single global effect runner, one fully live at a time
+-- — so the sleeps contribute nothing and the output is grab order:
+--
+--   5 1 4 1 3   (outSTM prepends, so grabs walk the list backwards)
+--
+-- exit 0, cleanly, via the (Bytes, Last) gate. Sleep is honored
+-- (each bundle really delays the runner) but orderless. If a §11.7
+-- flip makes THIS file print 1 1 3 4 5, sleep has become actually
+-- useful.
 --
 --   timeout 30 stack exec lindana -- sleepsort-not.lind
 
 {
-  (N, 3), (N, 1), (N, 4), (N, 1), (N, 5)
+  (Sort, 0, [3, 1, 4, 1, 5])
 }
 
-(N, n) : [sleep n * 10; say "%i" n; die]
+-- worker: unwind the list into (N, n) tuples, counting as we go
+(Sort, l, [h | t]) : [(N, h); (Sort, l + 1, t)]
+(Sort, l, [])      : (Counter, l)
+
+-- the sleeper: consume one number + one countdown token, re-arm the
+-- countdown immediately, then delay and report — except the LAST
+-- token holder, who closes the program after its own work
+(N, n), (Counter, r) :
+  if r == 1 then
+    [sleep n * 10; say "%i" n; bytesBind Last [1]]
+  else
+    [(Counter, r - 1); sleep n * 10; say "%i" n]
+
+(Bytes, Last) : exit 0
