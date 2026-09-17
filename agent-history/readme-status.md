@@ -1,0 +1,160 @@
+# README status snapshot (moved out of README.md, issue #30)
+
+The module-by-module layout and grammar-status notes that used to live
+in the README, relocated here (issue #30) so the README can be
+rewritten by hand without carrying status text. Frozen as of
+`runtime/std-fds` (§13.18); the handover's §13 is the live
+source-of-truth, this file is a freeze.
+
+## Layout
+
+- `src/Lindana/Syntax.hs` — AST and a round-trip pretty-printer
+  (parsing rendered output yields an equal AST).
+- `src/Lindana/Parser.hs` — megaparsec parser. Layout rule: newlines
+  are insignificant inside brackets; at bracket depth zero a newline
+  terminates a machine (so does a `}` closing a bag block, so
+  one-line `Name { pat : action }` blocks parse).
+- `src/Lindana/Runtime.hs` — the STM tuple bag and structural
+  matcher (§3): racing matches, join patterns, `rd`/`in`, rest
+  capture (§11.1).
+- `src/Lindana/Def.hs` — the lowered machine shape (`MachineDef`)
+  and reserved bag names, shared by loader, import, and machine
+  layers (kept in its own module so "Lindana.Import" can sit between
+  loader and machine without a cycle).
+- `src/Lindana/Import.hs` — module loading (issue #17, §13.13):
+  finds `<name>.lind` at runtime, drops hidden bags' machines,
+  suffix-mangles every atom in the module's source, and lowers it
+  with the module's own mangled Error bag.
+- `src/Lindana/Machine.hs` — the machine loop/scheduler (§1, §2),
+  the two-phase action layer + effect-runner (§7.2), the named
+  bag machinery (§6), the §9 bytestring side-table (`rtsBytes`):
+  one thread per machine, `out` is same-bag, `lob` crosses bags,
+  cross-bag atomicity for free. Also owns the §13.13 `import`
+  effect: spawns module machines mid-run, keeps the module registry
+  (singleton per name + suffix), and emits the `(Imported, H, suffix)`
+  completion gate — and the §13.14 error-reroute table (`rtsReroute`):
+  `reroute Src Tgt` repoints the `error` verb, bag-specific keys
+  taking precedence over a module's mangled Error bag ("all bags in
+  the module").
+- `src/Lindana/Prelude.hs` — the Prelude (issue #17 part 3, §13.15):
+  a builtin module (source embedded in the RTS) imported by default
+  in the top-level file, prefixless, through the ordinary import
+  machinery. One-shot preregistration machines only (`Newline`,
+  `Version`) — a looping service in the default import would keep
+  every program alive forever. The loader prepends the synthetic
+  `: import Prelude Nil []` one-shot unless `{-# no-prelude #-}`
+  opts out (then an explicit import brings it back, hide list and
+  all).
+- `src/Lindana/Loader.hs` — the program loader: lowers a parsed
+  `Program` into bag-tagged machines + per-bag initial tuples,
+  enforces the §6 declaration rules, installs the §6.4 default
+  `Error` machine when the program declares no `Error` bag, and
+  prepends the §13.15 default Prelude import unless pragma'd out.
+- `app/Main.hs` — `lindana <file.lind>`: parse, load, and run;
+  exits with the program's status. `--parse` re-renders only.
+- `test/Spec.hs` + `test/Lindana/` — hspec suite: parser round-trips,
+  matcher, machine loop, effects, bags, loader.
+- `examples/` — sample `.lind` files. `hello.lind` is the issue #7
+  no-LHS one-shot Hello World; `bags.lind` exercises named
+  bags end-to-end; `lists.lind` (§11.5) sums a list via cons-pattern
+  sugar; `strings.lind` (§9) shows casual-string literals matching
+  and decoding; `chars.lind` (§9, issue #12) shows character sugar
+  matching, consing into strings, and building bytestrings;
+  `bytes.lind` (§9) binds bytestring handles and
+  contrasts `bytesEqual` with `==`; `imports.lind` + `greeter.lind`
+  (§13.13) load a module at runtime with a namespace suffix and
+  gate on the `(Imported, …)` completion tuple; `reroute.lind` +
+  `flaky.lind` (§13.14) import a failing module and reroute its whole
+  error stream into a collector (last update wins, tag-as-provenance);
+  `prelude.lind` + `no-prelude.lind` (§13.15) show the default
+  Prelude import (gating on its `(Bytes, …)` completion tuples) and
+  the pragma + explicit-import-with-hide-list opt-out;
+  `sort.lind` (§13.16, issue #24) is a bubble sort as pure machines
+  (ordering comparisons are load-bearing: `<`/`<=` decide each swap,
+  base cases live in `if` bodies per the §13.12 race lesson) plus a
+  `bytesCompare` lexicographic demo; `files.lind` (§13.17, issue #18)
+  opens a file, writes a bytestring through it, reopens for reading
+  and pulls the content back (the second `fread` shows the spent-fd
+  empty remainder); `stdio.lind` (§13.18, issue #18 part 2) writes
+  through the preregistered `Stdout` fd, blocks on a piped
+  `fread Stdin` line, and `sayfd`-reroutes `Global`'s say stream into
+  a file and back (last update wins — run it with
+  `stack exec lindana -- examples/stdio.lind < examples/stdio-input.txt`);
+  `brainfuck.lind`
+  (§13.12) is a Brainfuck interpreter — zipper program and tape,
+  jump-table brackets, CPS reversal via `!` splice — that runs the
+  classic Hello World!; `throttle.lind` (§8.2) is a
+  deliberately non-terminating long-runner — the CLI reports it as a
+  deadlock when every machine ends up blocked.
+
+## Grammar status
+
+Implemented: machines (including no-LHS one-shot machines, §1: `:` at
+the start of a line), join patterns with `rd`/`in`, tuples with `!`
+splice, list/cons sugar (§11.5, provisional: `[a, b, c]` literals and
+`[h | t]` patterns desugar at parse time to nested 2-tuples ending in
+the `Nil` atom — rendering shows the desugared form), casual-string
+sugar (§9, provisional: `"..."` literals desugar at parse time to the
+same cons-list shape over codepoint `Int`s — plain Ints all the way
+down, no `Char`/`Str` type; `say %s` decodes, `atomize`/`atos`
+convert), character sugar (§9, issue #12, provisional: `'x'` is the
+single codepoint as a plain Int, `''` is a synonym for `Nil`, and
+multi-codepoint `'…'` is a parse error — use a string), Terse bracketed
+sequences `[a; b]`, `if/then/else`, verbs
+(`say` with `%b` for bytestring handles, `exit`, `die`/`quit`,
+`sleep`, `lob`, `error`, `panic`, `bytesBind`, `bytesDestroy`),
+builtin calls (`rand`, `typeOf`, `atomize`, `atos`, `bytesEqual`,
+`bytesRead`, `bytesCompare`),
+ordering comparisons (§13.16, issue #24, provisional: `<` `>` `<=`
+`>=` on same-kind numerics — C-style precedence, tighter than `==`;
+atoms order nowhere, `==`/`!=` are their whole story; an atom never
+orders against a number; `bytesCompare(A, B)` is the bytestring's
+enriched lexicographic version, `-1`/`0`/`1`),
+initial-bag blocks, named bag blocks, the §9 bytestring side-table
+(opaque atom handles; `==` is pure atom identity, `bytesEqual`
+compares contents; binds emit a `(Bytes, H)` completion tuple;
+`bytesRead` decodes a handle back into the codepoint list — a string
+in and out of ByteString is the identity, §9/issue #12), module
+import (§13.13, issue #17, provisional: `import H S Hide` loads
+`<name>.lind` at runtime from bytestring handles, suffix-mangles its
+atoms — a namespace — and spawns its machines mid-run; hide lists
+skip bags; `Nil → ""` is preregistered so the empty suffix is free;
+`lob`'s target may be a variable: bag names as data), and error
+rerouting (§13.14, issue #17, provisional: `reroute Src Tgt` repoints
+the `error` verb — a specific bag's errors, or a whole module's when
+`Src` is its mangled Error bag; last update wins; the tuple's tag
+stays the original mangled Error bag — provenance), and the Prelude
+(§13.15, issue #17 part 3, provisional: imported by default in the
+top-level file, prefixless — one-shot preregistration machines only
+(`Newline`, `Version`); `{-# no-prelude #-}` opts out, an explicit
+`import Prelude Nil […]` after the pragma brings it back with a hide
+list; the prelude is a builtin module — source in the RTS, resolved
+by the import effect before disk), and file descriptors (§13.17,
+issue #18, provisional: `fopen H Path Mode` opens a file (`R` reads,
+`W` truncates) under an opaque atom handle in the fd table;
+`fread`/`fwrite`/`fclose` take the handle as an expression — fds
+travel as data; `fread` pulls the entire remaining content into the
+bytestring side-table under the SAME handle (clobbering — `say %b`
+reads it back) and spends the fd; effects emit `(Fopen, H)` /
+`(Fread, H)` / `(Fwrote, H)` completion tuples into `Global`; a
+failed FD effect is a runner-safe fatal, exit 1), and std fds +
+  un-magicked `say` (§13.18, issue #18 part 2, provisional:
+  `Stdin`/`Stdout`/`Stderr` are preregistered as ordinary fd-table
+  entries; `say` formats its line as before but writes it through the
+  fd table like any `fwrite` — routed by `sayfd Bag Fd` (the §13.14
+  reroute's sister: bag-specific key, module-wide key = the module's
+  mangled Error bag, default `Stdout`, last update wins, fd not
+  checked to exist — the say effect fatals honestly if it never
+  appears); `fread Stdin` blocks for a line (`hGetLine` — EOF reads
+  as the empty remainder, the fd is never spent by a line read; a
+  blocked read parks the global effect runner, §11.7)).
+Effect bundles need no syntax (§11.6, provisionally resolved): a
+reaction's post-commit action list *is* the bundle.
+
+Not yet (handover §11): mixed int/double arithmetic, effect-runner
+scope, unified error routing. Provisional (flip
+worthy): pattern-side rest capture is trailing-only (§11.1), the
+list/cons sugar desugaring (§11.5), the string-literal desugaring
+(§9), the character-literal desugaring (§9, issue #12), the
+§11.10 top-level grammar (see the loader's header), and the §6.4
+default-`Error`-machine installation rule.
