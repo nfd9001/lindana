@@ -322,6 +322,29 @@ main = hspec $ do
         progDecls (mangleProgram "_v2" p) `shouldBe`
           [Machine [] [Reroute (EAtom "Error_v2") (EAtom "Log_v2")]]
 
+    -- §13.18 (issue #18 part 2): the say-FD reroute sister effect —
+    -- both arguments are bag names (atoms, or variables holding names
+    -- as data); both mangle, so a module can only sayfd its own bags
+    -- (its written `Error` is its own mangled Error bag).
+    describe "sayfd action (§13.18, issue #18)" $ do
+      it "parses sayfd with two bag-name arguments" $ do
+        p <- parseOk ": sayfd Log Out"
+        progDecls p `shouldBe`
+          [Machine [] [SayFd (EAtom "Log") (EAtom "Out")]]
+      it "accepts variables (bag/fd names as data, the §13.13 extension)" $ do
+        p <- parseOk "(b,) : sayfd b Log"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PVar "b"])]
+                   [SayFd (EVar "b") (EAtom "Log")]]
+      it "reserves sayfd (no variable named sayfd)" $
+        isLeft (parseProgram "(sayfd,) : die")
+      it "round-trips" $
+        roundTrips ": [sayfd Log Out; sayfd Error Stderr]" `shouldBe` True
+      it "mangles both arguments (a module can only sayfd its own bags)" $ do
+        p <- parseOk ": sayfd Error Out"
+        progDecls (mangleProgram "_v2" p) `shouldBe`
+          [Machine [] [SayFd (EAtom "Error_v2") (EAtom "Out_v2")]]
+
     describe "file-descriptor verbs (§13.17, issue #18)" $ do
       it "parses fopen with handle, string path, mode atom" $ do
         p <- parseOk ": fopen Log \"log.txt\" W"

@@ -121,6 +121,7 @@ module Lindana.Machine
   , interpretActions
   , evalR
   , rtsBuiltin
+  , sayTargetSTM
     -- * Effect formatting
   , formatSay
   , renderVal
@@ -148,7 +149,9 @@ import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import System.Random (StdGen, mkStdGen, uniformR)
 import System.Exit (ExitCode (..))
 import System.IO (Handle, IOMode (ReadMode, WriteMode), hClose, hFlush,
-                  hSetBinaryMode, hPutStrLn, openFile, stderr)
+                  hSetBinaryMode, hPutStrLn, openFile, stderr, stdin, stdout,
+                  stderr)
+import System.IO.Error (isEOFError)
 import qualified Data.ByteString as BS
 
 import Lindana.Def (MachineDef (..), globalBag, errorBag)
@@ -211,77 +214,124 @@ data RTS = RTS
                                       --   @reroute Src Tgt@ (last update
                                       --   wins: plain 'Map.insert'), read
                                       --   by the @error@ verb's routing.
+  , rtsSayFd :: TVar (Map Name Name)  -- ^ §13.18 say-FD route table (the
+                                      --   §13.14 sister): bag name → fd
+                                      --   handle that bag's @say@s go
+                                      --   through (bag key first, then the
+                                      --   module's mangled Error bag, then
+                                      --   default @Stdout@). Written by
+                                      --   @sayfd Bag Fd@, read by the
+                                      --   @say@ verb's routing.
   , rtsFds :: TVar (Map Name FdState) -- ^ §13.17 fd table (issue #18):
                                       --   opaque atom handle → open OS
                                       --   handle + mode. To the matcher a
                                       --   handle is just an ordinary atom;
-                                      --   only the @f*@ verbs reach in.
-                                      --   Empty at start — the std fds
-                                      --   (Stdin/Stdout/Stderr) are the
-                                      --   issue's next slice. Nothing is
-                                      --   special: last @fopen@ on a name
-                                      --   wins, closing the superseded OS
-                                      --   handle first (a silent leak
-                                      --   would keep the file locked and
-                                      --   un-reopenable; flip-worthy).
+                                      --   only the @f*@ verbs (and now
+                                      --   @say@) reach in. Preregistered
+                                      --   at start (§13.18): @Stdin@
+                                      --   (read, line mode), @Stdout@ and
+                                      --   @Stderr@ (write) — ordinary
+                                      --   entries, nothing special: last
+                                      --   @fopen@ on a name wins, closing
+                                      --   the superseded OS handle first
+                                      --   (a silent leak would keep the
+                                      --   file locked and un-reopenable;
+                                      --   flip-worthy), and @fclose
+                                      --   Stdout@ makes every later @say@
+                                      --   a fatal, honestly.
   , rtsHooks :: Hooks
   }
 
--- | Injectable effect targets and environment, so tests can observe
--- @say@\/@panic@ without touching real stdio and point module
--- searches wherever the fixtures are.
+-- | Injectable effect environment. With @say@ un-magicked (§13.18)
+-- there is no @say@ callback any more: output goes through the fd
+-- table, so what tests inject are the /std Handles/ the std fds are
+-- preregistered with — point @hookStdout@ at a scratch file to
+-- capture a program's @say@ stream. @panic@ is still a callback: it
+-- is fatal, never routed, and stays hook-based (§13.14).
 data Hooks = Hooks
-  { hookSay    :: String -> IO ()   -- ^ default: stdout
-  , hookPanic  :: String -> IO ()   -- ^ default: stderr
-  , hookModDir :: FilePath          -- ^ directory @import@ searches for
-                                    --   @<name>.lind@ module files
-                                    --   (§13.13); default: @"."@. The
-                                    --   CLI sets it to the main file's
-                                    --   directory. Provisional home for
-                                    --   this knob (flip-worthy).
+  { hookStdin  :: Handle           -- ^ default: 'stdin' — the @Stdin@
+                                   --   fd's OS handle (@fread@ blocks
+                                   --   for a line)
+  , hookStdout :: Handle           -- ^ default: 'stdout' — the @Stdout@
+                                   --   fd's OS handle (and @say@'s target)
+  , hookStderr :: Handle           -- ^ default: 'stderr' — the @Stderr@
+                                   --   fd's OS handle
+  , hookPanic  :: String -> IO ()  -- ^ default: stderr, @"panic: "@-prefixed
+  , hookModDir :: FilePath         -- ^ directory @import@ searches for
+                                   --   @<name>.lind@ module files
+                                   --   (§13.13); default: @"."@. The
+                                   --   CLI sets it to the main file's
+                                   --   directory. Provisional home for
+                                   --   this knob (flip-worthy).
   }
 
 defaultHooks :: Hooks
 defaultHooks = Hooks
-  { hookSay    = putStrLn
+  { hookStdin  = stdin
+  , hookStdout = stdout
+  , hookStderr = stderr
   , hookPanic  = hPutStrLn stderr . ("panic: " ++)
   , hookModDir = "."
   }
 
--- | A fresh RTS (fixed @rand@ seed: deterministic runs).
+-- | §13.18: the std fd-table names. Ordinary atoms — @fopen@ can
+-- shadow them (last wins), @fclose@ can drop them, @say@ fatals
+-- honestly when its routed fd is gone.
+stdFdIn, stdFdOut, stdFdErr :: Name
+stdFdIn  = "Stdin"
+stdFdOut = "Stdout"
+stdFdErr = "Stderr"
+
+-- | A fresh RTS (fixed @rand@ seed: deterministic runs; the std fds
+-- preregistered binary — @say@ and @fwrite@ write UTF-8\/raw bytes).
 newRTS :: IO RTS
 newRTS = newRTSWith defaultHooks
 
 newRTSWith :: Hooks -> IO RTS
-newRTSWith hooks = atomically $ do
-  bag   <- newBagSTM
-  queue <- newTQueue
-  live  <- newTVar 0
-  exit  <- newTVar Nothing
-  stop  <- newTVar False
-  seed  <- newTVar (mkStdGen 12345)
-  bags  <- newTVar Map.empty
-  -- §13.13 + §13.15: two bytestrings preregistered — Nil → "" (the
-  -- free empty import suffix, §13.13) and the prelude's name handle
-  -- Prelude → "Prelude" (what the §13.15 default-import machine's
-  -- @import Prelude Nil []@ reads; @bytesBind Prelude "Prelude"@ is
-  -- the manual spelling). Neither is special: bytesBind Nil … or
-  -- bytesDestroy Prelude clobbers/drops either like any handle.
-  bytes <- newTVar (Map.fromList
-    [ ("Nil", encodeUtf8 (T.pack ""))
-    , (preludeName, encodeUtf8 (T.pack preludeName))
-    ])
-  mods  <- newTVar Map.empty
-  extra <- newTVar []
-  reroute <- newTVar Map.empty
-  fds   <- newTVar Map.empty
-  pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
-           , rtsLive = live, rtsExit = exit, rtsStop = stop
-           , rtsBags = bags, rtsBytes = bytes
-           , rtsMods = mods, rtsExtra = extra
-           , rtsReroute = reroute, rtsHooks = hooks
-           , rtsFds = fds
-           }
+newRTSWith hooks = do
+  let hin  = hookStdin hooks
+      hout = hookStdout hooks
+      herr = hookStderr hooks
+  mapM_ (\x -> hSetBinaryMode x True) [hin, hout, herr]
+  atomically $ do
+    bag   <- newBagSTM
+    queue <- newTQueue
+    live  <- newTVar 0
+    exit  <- newTVar Nothing
+    stop  <- newTVar False
+    seed  <- newTVar (mkStdGen 12345)
+    bags  <- newTVar Map.empty
+    -- §13.13 + §13.15: two bytestrings preregistered — Nil → "" (the
+    -- free empty import suffix, §13.13) and the prelude's name handle
+    -- Prelude → "Prelude" (what the §13.15 default-import machine's
+    -- @import Prelude Nil []@ reads; @bytesBind Prelude "Prelude"@ is
+    -- the manual spelling). Neither is special: bytesBind Nil … or
+    -- bytesDestroy Prelude clobbers/drops either like any handle.
+    bytes <- newTVar (Map.fromList
+      [ ("Nil", encodeUtf8 (T.pack ""))
+      , (preludeName, encodeUtf8 (T.pack preludeName))
+      ])
+    mods  <- newTVar Map.empty
+    extra <- newTVar []
+    reroute <- newTVar Map.empty
+    sayFd <- newTVar Map.empty
+    -- §13.18 (issue #18 part 2): the std fds, preregistered — ordinary
+    -- fd-table entries, nothing special. @Stdin@ is the line-mode read
+    -- fd (@fread@ blocks for a line); @Stdout@/@Stderr@ are write fds,
+    -- and @say@'s default route is @Stdout@.
+    fds   <- newTVar (Map.fromList
+      [ (stdFdIn,  FdState hin  FdRead  False True)
+      , (stdFdOut, FdState hout FdWrite False False)
+      , (stdFdErr, FdState herr FdWrite False False)
+      ])
+    pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
+             , rtsLive = live, rtsExit = exit, rtsStop = stop
+             , rtsBags = bags, rtsBytes = bytes
+             , rtsMods = mods, rtsExtra = extra
+             , rtsReroute = reroute, rtsSayFd = sayFd
+             , rtsHooks = hooks
+             , rtsFds = fds
+             }
 
 -- | Resolve a bag name to its 'RBag' (§6). @Global@ is the main bag;
 -- any other name is found in 'rtsBags' or created on demand. On-demand
@@ -335,7 +385,12 @@ newtype Bundle = Bundle { bundleEffects :: [Effect] }
 -- ('EffExit'/'EffPanic') end the bundle: the program is over, later
 -- effects are dropped (§7.2 gives no rollback; here not even a queue).
 data Effect
-  = EffSay String [Val]   -- ^ @say "fmt" args…@ (@%i@, @%s@, @%a@, @%b@, @%%@)
+  = EffSay Name String [Val]  -- ^ @say "fmt" args…@ (@%i@, @%s@, @%a@,
+                          -- @%b@, @%%@) — §13.18: the first field is
+                          -- the fd the formatted line is written
+                          -- through, resolved in-transaction via
+                          -- 'sayTargetSTM' (default @Stdout@); say
+                          -- is no longer a magic console write.
   | EffSleep Int          -- ^ @sleep e@ — milliseconds (provisional unit)
   | EffExit Val           -- ^ @exit e@ — terminate the program
   | EffPanic Val          -- ^ @panic e@ — fatal (§6.4)
@@ -399,10 +454,15 @@ data FdState = FdState
   { fdHandle :: Handle
   , fdMode   :: FdMode
   , fdSpent  :: Bool
+  , fdLine   :: Bool   -- ^ §13.18: line-mode read fd (@Stdin@ only):
+                       --   @fread@ blocks for one line ('BS.hGetLine');
+                       --   EOF reads as the honest empty remainder.
+                       --   Never spent by a read — lines keep coming.
   }
 
 instance Show FdState where
-  show (FdState _ m _) = "FdState { fdMode = " ++ show m ++ " }"
+  show (FdState _ m _ l) =
+    "FdState { fdMode = " ++ show m ++ ", fdLine = " ++ show l ++ " }"
 
 --------------------------------------------------------------------------------
 -- The interpreter (action layer, §3.3 + §7)
@@ -548,7 +608,16 @@ interpretActions rts bag sfx bagName env = go []
         go acc rest
       Say f es -> do
         vs <- mapM (evalR rts env) es
-        go (EffSay f vs : acc) rest
+        -- §13.18: say's fd is resolved in-transaction — the reroute
+        -- (§13.14) semantics: a sayfd installed by this machine
+        -- earlier in the same action list is honored, the routed fd
+        -- travels with the deferred bundle, and a concurrent sayfd
+        -- from another machine racing this one is ordinary §3.1
+        -- STM-commit chaos. The effect writes through the fd table
+        -- like any fwrite (say is un-magicked); a routed fd that is
+        -- closed/unknown by run time fatals honestly (runner-safe).
+        tgt <- sayTargetSTM rts bagName sfx
+        go (EffSay tgt f vs : acc) rest
       Sleep e -> do
         t <- evalR rts env e
         go (effSleep t : acc) rest
@@ -610,6 +679,21 @@ interpretActions rts bag sfx bagName env = go []
         tgt <- atomName tv
         modifyTVar' (rtsReroute rts) (Map.insert src tgt)
         go acc rest
+      SayFd srcE tgtE -> do
+        -- §13.18: the say-FD reroute sister effect (issue #18 part
+        -- 2) — exactly the §13.14 design with a different table:
+        -- @sayfd Bag Fd@ repoints what fd @say@s by machines declared
+        -- in @Bag@ go through (in-transaction install, last update
+        -- wins). Targets are NOT checked against the fd table (the
+        -- reroute precedent): routing to a not-yet-opened fd is the
+        -- §6.2 accumulator story — the say effect fatals honestly at
+        -- run time if the fd never appears.
+        sv <- evalR rts env srcE
+        tv <- evalR rts env tgtE
+        src <- atomName sv
+        tgt <- atomName tv
+        modifyTVar' (rtsSayFd rts) (Map.insert src tgt)
+        go acc rest
       FOpen h pE mE -> do
         -- §13.17: path and mode resolve in-transaction (the bytesBind
         -- precedent — the declaration site's data is fixed at commit);
@@ -659,15 +743,15 @@ atomHandle (VAtom n) = n
 atomHandle _ =
   error "import: name and suffix must be bytestring handles (atoms, §13.13)"
 
--- | §13.14: @reroute@'s source and target must be atoms (bag names —
--- the parser also accepts variables holding bag names as data, the
--- §13.13 @lob@-target extension). Anything else is the provisional
--- Haskell-level error, same routing as the other action-layer checks
--- (§3.3).
+-- | §13.14: @reroute@'s and §13.18 @sayfd@'s source and target must
+-- be atoms (bag names — the parser also accepts variables holding bag
+-- names as data, the §13.13 @lob@-target extension). Anything else is
+-- the provisional Haskell-level error, same routing as the other
+-- action-layer checks (§3.3).
 atomName :: Val -> STM Name
 atomName (VAtom n) = pure n
 atomName _ =
-  error "reroute: source and target must be bag names (atoms, §13.14)"
+  error "reroute/sayfd: source and target must be bag names (atoms, §13.14/§13.18)"
 
 -- | §13.13: the hide list is a cons-list of atoms (the §11.5 list
 -- literal shape, or @[]@) naming module bags whose machines are not
@@ -721,6 +805,42 @@ errorTargetSTM rts bag sfx = do
                                   --    errors — "all bags in the
                                   --    module", issue #17
       Nothing   -> mangled        -- 3. the machine's mangled Error bag
+
+-- | §13.18: the @say@ verb's fd routing decision — 'errorTargetSTM''s
+-- design, one tier for the fd table (§13.14's sister, issue #18 part
+-- 2). @bag@ is the machine's own bag; @sfx@ its module's ambient
+-- suffix. In precedence order:
+--
+--   1. /Bag-specific route/ (@sayfd Bag Fd@): keyed by the machine's
+--      own bag name.
+--   2. /Module-wide route/: keyed by the machine's module's mangled
+--      Error bag (@'errorBag' ++ sfx@) — the same convention that
+--      stands for "all bags in the module" in §13.14 (it is the only
+--      per-module name a module's source can spell, and every module
+--      machine consults it). At top level (@sfx == ""@) this key IS
+--      plain @Error@, so @sayfd Error Fd@ catches every top-level
+--      machine's says.
+--   3. /The default/: @Stdout@ — pre-un-magicking behavior exactly.
+--
+-- Resolved in-transaction (the interpretActions Say case); the
+-- chosen fd is /not/ checked against the fd table here — an unknown
+-- fd is the say effect's honest runner-safe fatal at run time (the
+-- reroute "targets not checked" precedent). The hazard that a table
+-- name like @Error ++ suffix@ can collide with a real bag is §13.14's,
+-- shared verbatim here (documented, not guarded).
+sayTargetSTM :: RTS -> Name -> String -> STM Name
+sayTargetSTM rts bag sfx = do
+  rr <- readTVar (rtsSayFd rts)
+  let mangled = errorBag ++ sfx
+  pure $ case Map.lookup bag rr of
+    Just tgt -> tgt               -- 1. bag-specific sayfd wins
+    Nothing -> case Map.lookup mangled rr of
+      Just tgt  -> tgt            -- 2. module-wide: at top level
+                                  --    (sfx == "") this key IS plain
+                                  --    Error, so @sayfd Error Fd@
+                                  --    catches every top-level
+                                  --    machine's says
+      Nothing   -> stdFdOut       -- 3. the default Stdout
 
 -- | @error e@ (§6.4): an @(Error, …)@ tuple into the named @Error@
 -- bag (conceptually sugar over @lob Error …@); a tuple argument's
@@ -830,9 +950,26 @@ runBundle rts = go
   where
     go [] = pure ()
     go (e : es) = case e of
-      EffSay f vs -> do
+      EffSay tgt f vs -> do
+        -- §13.18: say is un-magicked — the formatted line (plus its
+        -- newline) goes through the fd table like any fwrite: looked
+        -- up at effect time (a fclose Stdout between queueing and run
+        -- fatals, honestly), BS.hPut + hFlush (the fwrite precedent).
+        -- Unknown fd / wrong mode are runner-safe fatals (§13.17).
+        fds <- readTVarIO (rtsFds rts)
         m <- readTVarIO (rtsBytes rts)
-        hookSay (rtsHooks rts) (formatSay m f vs) >> go es
+        case Map.lookup tgt fds of
+          Nothing -> fdFailed rts ("say: unknown fd handle " ++ tgt)
+          Just fd | fdMode fd /= FdWrite ->
+            fdFailed rts ("say: handle " ++ tgt ++ " is not open for writing")
+                  | otherwise -> do
+            r <- try (BS.hPut (fdHandle fd)
+                        (encodeUtf8 (T.pack (formatSay m f vs ++ "\n")))
+                        >> hFlush (fdHandle fd))
+            case r of
+              Right () -> go es
+              Left exc -> fdFailed rts ("say " ++ tgt ++ ": "
+                                        ++ show (exc :: SomeException))
       EffSleep ms -> threadDelay (ms * 1000) >> go es
       EffExit v   -> atomically (setExit rts (exitCodeOf v))  -- program over
       EffPanic v  -> do
@@ -885,7 +1022,7 @@ runBundle rts = go
         case r of
           Right hh -> do
             atomically $ do
-              modifyTVar' (rtsFds rts) (Map.insert h (FdState hh mode False))
+              modifyTVar' (rtsFds rts) (Map.insert h (FdState hh mode False False))
               b <- bagForSTM rts globalBag
               outSTM b (VTuple [VAtom "Fopen", VAtom h])
             go es
@@ -903,37 +1040,64 @@ runBundle rts = go
             atomically (modifyTVar' (rtsFds rts) (Map.delete h)) >> go es
       EffFread h -> do
         fds <- readTVarIO (rtsFds rts)
+        -- The gate-tuple emit, shared by every read flavor: clobber
+        -- the side-table entry and emit @(Fread, H)@ into @Global@
+        -- (the deterministic gate), then continue the bundle.
+        let emitGate bs = do
+              atomically $ do
+                modifyTVar' (rtsBytes rts) (Map.insert h bs)
+                b <- bagForSTM rts globalBag
+                outSTM b (VTuple [VAtom "Fread", VAtom h])
+              go es
         case Map.lookup h fds of
-          Nothing -> fdFailed rts ("fread: unknown fd handle " ++ h)
-          Just fd | fdMode fd /= FdRead ->
-            fdFailed rts ("fread: handle " ++ h ++ " is not open for reading")
-                  | fdSpent fd -> do
-            -- Spent read fd: the empty remainder. Still clobber the
-            -- side-table entry and emit the gate tuple — the content
-            -- really is "" now.
-            atomically $ do
-              modifyTVar' (rtsBytes rts) (Map.insert h BS.empty)
-              b <- bagForSTM rts globalBag
-              outSTM b (VTuple [VAtom "Fread", VAtom h])
-            go es
-                  | otherwise -> do
-            r <- try (BS.hGetContents (fdHandle fd))
-            case r of
-              Right bs -> do
-                -- Content lands in the bytestring side-table under the
-                -- SAME handle (clobbering): `say %b H` reads it back,
-                -- and (Fread, H) is the deterministic gate. The fd is
-                -- now spent ('BS.hGetContents' closed it); see
-                -- 'FdState'.
-                atomically $ do
-                  modifyTVar' (rtsBytes rts) (Map.insert h bs)
-                  modifyTVar' (rtsFds rts)
-                              (Map.insert h fd { fdSpent = True })
-                  b <- bagForSTM rts globalBag
-                  outSTM b (VTuple [VAtom "Fread", VAtom h])
-                go es
-              Left exc -> fdFailed rts ("fread " ++ h ++ ": "
-                                        ++ show (exc :: SomeException))
+          Nothing ->
+            fdFailed rts ("fread: unknown fd handle " ++ h)
+          Just fd
+            | fdMode fd /= FdRead ->
+              fdFailed rts ("fread: handle " ++ h
+                            ++ " is not open for reading")
+            | fdSpent fd ->
+              -- Spent read fd: the empty remainder. Still clobber the
+              -- side-table entry and emit the gate tuple — the content
+              -- really is "" now.
+              emitGate BS.empty
+            | fdLine fd -> do
+              -- §13.18 (issue #18 part 2): line-mode read fd — Stdin.
+              -- fread BLOCKS for one line (the carried §13.17 open
+              -- question, resolved toward blocking-available): the
+              -- cost is that the (§11.7, global) effect runner parks
+              -- until a line arrives — every other queued effect
+              -- waits behind it. Documented, not guarded. EOF reads
+              -- as the honest empty remainder (the spent-fd shape):
+              -- clobber "" and emit the gate tuple; the fd is NOT
+              -- spent — lines keep coming until EOF, and it stays EOF
+              -- after.
+              r <- try (BS.hGetLine (fdHandle fd))
+              case r of
+                Right ln -> emitGate ln
+                Left exc
+                  | isEOFError exc -> emitGate BS.empty
+                  | otherwise ->
+                    fdFailed rts ("fread " ++ h ++ ": "
+                                  ++ show (exc :: IOError))
+            | otherwise -> do
+              r <- try (BS.hGetContents (fdHandle fd))
+              case r of
+                Right bs -> do
+                  -- Content lands in the bytestring side-table under
+                  -- the SAME handle (clobbering): `say %b H` reads it
+                  -- back, and (Fread, H) is the deterministic gate.
+                  -- The fd is now spent ('BS.hGetContents' closed it);
+                  -- see 'FdState'.
+                  atomically $ do
+                    modifyTVar' (rtsBytes rts) (Map.insert h bs)
+                    modifyTVar' (rtsFds rts)
+                                (Map.insert h fd { fdSpent = True })
+                    b <- bagForSTM rts globalBag
+                    outSTM b (VTuple [VAtom "Fread", VAtom h])
+                  go es
+                Left exc -> fdFailed rts ("fread " ++ h ++ ": "
+                                          ++ show (exc :: SomeException))
       EffFwrite h src -> do
         fds <- readTVarIO (rtsFds rts)
         bytes <- readTVarIO (rtsBytes rts)

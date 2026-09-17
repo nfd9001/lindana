@@ -7,4 +7,6 @@ dist-newstyle/
 *.swp
 *.swo
 *~
-examples/files-out.tmp
+files-out.tmp
+stdio-out.tmp
+examples/stdio-out.tmp

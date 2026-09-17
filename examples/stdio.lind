@@ -1,0 +1,25 @@
+-- §13.18 (issue #18 part 2): std fds + un-magicked say + sayfd. The
+-- std fds Stdin/Stdout/Stderr are preregistered as ordinary fd-table
+-- entries; say is no longer magic — it writes its line through the
+-- fd named by the say-fd route table (default Stdout), and fread
+-- Stdin BLOCKS for a line. Run with input piped:
+--
+--   lindana examples/stdio.lind < examples/stdio-input.txt
+--
+-- Stdout output is deterministic given the input; the rerouted line
+-- lands in stdio-out.tmp (created in the run's working directory,
+-- like files.lind's).
+
+: bytesBind Greeting "Hello, std fds!\n"
+(Bytes, Greeting) : [fwrite Stdout Greeting; (Go,)]
+-- fread Stdin blocks the effect runner for one line; the line lands
+-- in the side-table under the same handle.
+(Go,) : [fread Stdin; (Read,)]
+(Read,) : [say "you typed: %b" Stdin; (Route,)]
+-- The say-FD reroute sister effect: repoint what fd Global's says go
+-- through (in-transaction install, last update wins). The next say
+-- lands in the file; the second sayfd reroutes back.
+(Route,) : [fopen Log "stdio-out.tmp" W; (Routed,)]
+(Routed,) : [sayfd Global Log; say "this line is rerouted"
+            ; sayfd Global Stdout; (Fin,)]
+(Fin,) : [say "back on stdout (last update wins)"; exit 0]

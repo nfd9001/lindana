@@ -198,6 +198,22 @@ data Action
                                 --   fd-as-data pattern, so a module can
                                 --   write through a caller-passed fd).
                                 --   Emits @(Fwrote, H)@ into @Global@.
+  | SayFd Expr Expr            -- ^ @sayfd Bag Fd@ (issue #18, §13.18) —
+                                --   the say-FD reroute sister effect:
+                                --   repoint what fd @say@s by machines
+                                --   declared in bag @Bag@ go through —
+                                --   the fd named by @Fd@ (an atom, or a
+                                --   variable holding the fd name as
+                                --   data). @Fd@ may also name a /module/
+                                --   in the §13.14 sense: the module's
+                                --   mangled Error bag stands for "all
+                                --   bags in the module". Both arguments
+                                --   must evaluate to atoms; both mangle;
+                                --   last update wins; the fd is NOT
+                                --   checked to exist (the say effect
+                                --   fatals honestly at run time if it
+                                --   never appears). See
+                                --   "Lindana.Machine" for the routing.
   | If Expr [Action] [Action]   -- ^ Terse @if@; branches are action sequences.
   deriving (Eq, Show)
 
@@ -258,6 +274,8 @@ renderAction (Import h s hide) =
   unwords ["import", renderExpr h, renderExpr s, renderExpr hide]
 renderAction (Reroute src tgt) =
   unwords ["reroute", renderExpr src, renderExpr tgt]
+renderAction (SayFd src tgt) =
+  unwords ["sayfd", renderExpr src, renderExpr tgt]
 renderAction (If c t e)   =
   "if " ++ renderExpr c ++ " then " ++ renderActionSeq t
   ++ " else " ++ renderActionSeq e

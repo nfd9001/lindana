@@ -91,7 +91,12 @@ Git history might be a better source-of-truth about recent progress until I've e
   `bytesCompare` lexicographic demo; `files.lind` (§13.17, issue #18)
   opens a file, writes a bytestring through it, reopens for reading
   and pulls the content back (the second `fread` shows the spent-fd
-  empty remainder); `brainfuck.lind`
+  empty remainder); `stdio.lind` (§13.18, issue #18 part 2) writes
+  through the preregistered `Stdout` fd, blocks on a piped
+  `fread Stdin` line, and `sayfd`-reroutes `Global`'s say stream into
+  a file and back (last update wins — run it with
+  `stack exec lindana -- examples/stdio.lind < examples/stdio-input.txt`);
+  `brainfuck.lind`
   (§13.12) is a Brainfuck interpreter — zipper program and tape,
   jump-table brackets, CPS reversal via `!` splice — that runs the
   classic Hello World!; `throttle.lind` (§8.2) is a
@@ -172,7 +177,17 @@ travel as data; `fread` pulls the entire remaining content into the
 bytestring side-table under the SAME handle (clobbering — `say %b`
 reads it back) and spends the fd; effects emit `(Fopen, H)` /
 `(Fread, H)` / `(Fwrote, H)` completion tuples into `Global`; a
-failed FD effect is a runner-safe fatal, exit 1).
+failed FD effect is a runner-safe fatal, exit 1), and std fds +
+  un-magicked `say` (§13.18, issue #18 part 2, provisional:
+  `Stdin`/`Stdout`/`Stderr` are preregistered as ordinary fd-table
+  entries; `say` formats its line as before but writes it through the
+  fd table like any `fwrite` — routed by `sayfd Bag Fd` (the §13.14
+  reroute's sister: bag-specific key, module-wide key = the module's
+  mangled Error bag, default `Stdout`, last update wins, fd not
+  checked to exist — the say effect fatals honestly if it never
+  appears); `fread Stdin` blocks for a line (`hGetLine` — EOF reads
+  as the empty remainder, the fd is never spent by a line read; a
+  blocked read parks the global effect runner, §11.7)).
 Effect bundles need no syntax (§11.6, provisionally resolved): a
 reaction's post-commit action list *is* the bundle.
 

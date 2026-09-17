@@ -181,6 +181,14 @@ mangleAction sfx a = case a of
   -- bags); it cannot name the real top-level Error, consistent with
   -- the no-Global-exemption story (module header).
   Reroute src tgt -> Reroute (mangleExpr sfx src) (mangleExpr sfx tgt)
+  -- §13.18: the sayfd arguments are atom mentions like reroute's —
+  -- mangled like any other mention. A module can only sayfd its OWN
+  -- bags (its written `Error` mangles to the module's mangled Error
+  -- bag — sayfd-ing "all bags in this module" to one of its own fds);
+  -- it cannot name the real top-level Error or the real Stdout except
+  -- as data (a variable holding the fd name — the §13.17
+  -- fd-as-data pattern).
+  SayFd src tgt  -> SayFd (mangleExpr sfx src) (mangleExpr sfx tgt)
   -- §13.17 (issue #18): the fd handle mangles (the bytesBind
   -- precedent — declaring a handle is the declaration site's job), the
   -- path expression mangles its atoms but not the string literal (data),

@@ -1,0 +1,111 @@
+PROVISIONAL: std-fd semantics (§13.18, issue #18 part 2)
+Branch: runtime/std-fds
+
+Flip-worthy calls made in the std-fd / un-magicked-say slice, each
+with its alternative and flip instructions. Like every provisional
+decision: recorded, not litigated — flip with a test update and a
+handover note.
+
+1. The say-FD sister verb is spelled `sayfd Bag Fd`. Alternatives:
+   `reroutesay`, `fdroute`, `outfd`, or generalizing §13.14's
+   `reroute` itself to arbitrary message streams (the Accursed FUTURE
+   OPTION in provisional-error-reroute-semantics.txt — say would then
+   be one stream among many). Flip: rename the verb in
+   `Lindana.Syntax`/`Parser.hs`/`Import.hs` and the two messageboard
+   mentions; the table and routing are unchanged.
+
+2. The module-wide say key is the module's mangled Error bag
+   (`Error ++ sfx`), verbatim the §13.14 convention — the only
+   per-module name a module's source can spell, and every module
+   machine consults it. At top level (sfx "") this key IS plain
+   `Error`, so `sayfd Error F` catches every top-level machine's
+   says (and `sayfd Global F` catches them too, via the bag key —
+   two spellings for the same thing, deterministic, documented).
+   Alternative: a dedicated module-wide key spelled with a wildcard
+   atom (no spellable candidate exists) or keying on the ambient
+   suffix (not spellable as an atom either, §13.14's words). Flip:
+   change the tier-2 key in `sayTargetSTM` and the tests that lean
+   on `Error`/`Error_v2`.
+
+3. The routed fd is NOT checked to exist at install time (the
+   reroute "targets not checked" precedent): `sayfd` to an fd that
+   never opens is the §6.2 accumulator story, and the say effect
+   fatals honestly at run time (`say: unknown fd handle …`, runner-
+   safe, exit 1). Alternative: reject unknown fd names in the action
+   layer — would break the "route before open" gating idiom the
+   tests use. Flip: an fd-table membership check in
+   `interpretActions`'s SayFd case + test updates.
+
+4. `say` resolves its fd IN-TRANSACTION (the §13.14 reroute
+   semantics): a sayfd earlier in the same action list is honored;
+   the chosen fd travels with the deferred bundle; a concurrent
+   sayfd from another machine racing the say's transaction is §3.1
+   STM-commit chaos. Alternative: resolve at effect-run time (a
+   racing sayfd between queueing and running would apply). Flip:
+   drop `EffSay`'s first field, resolve via `sayTargetSTM` in
+   `runBundle` — but then sayfd ordering within one machine's action
+   list becomes non-deterministic, which is why in-transaction won.
+
+5. `say` appends a newline (`formatSay` output ++ "\n") and writes
+   UTF-8 through a binary-mode handle — byte-identical to the old
+   `putStrLn` behavior for ASCII, now encoding-explicit. `fwrite`
+   stays byte-exact (no newline). Alternative: say byte-exact too —
+   flip is a one-line change in `runBundle`'s EffSay plus every
+   example/test whose output shifts.
+
+6. `fread Stdin` (the carried §13.17 open question) BLOCKS FOR A
+   LINE: `BS.hGetLine` on the line-mode fd — the carried question's
+   "block for a line" arm, chosen because blocking reads should at
+   least be AVAILABLE (the §13.17 messageboard's flip #5 declined
+   line reads for files, where whole-remainder is the honest
+   content story; stdin has no "whole remaining content" without
+   EOF). EOF reads as the honest empty remainder (the spent-fd
+   shape: clobber "" + emit the gate tuple); the fd is never spent
+   by a line read and stays EOF after. Alternatives: read-available
+   (non-blocking, needs select/poll — no portable STM-friendly
+   story); whole-stdin-to-EOF (closes stdin, unusable). Flip: clear
+   the new FdState's `fdLine` for Stdin and add a separate verb if
+   line reads are still wanted.
+
+7. `fread` of a line-mode fd clobbers the side-table entry under the
+   SAME handle (`rtsBytes["Stdin"]`) — the §13.17 dual-table
+   same-handle design, unchanged. Hazard: `bytesBind Stdin …`
+   clobbers the last read line harmlessly; `fread Stdin` then
+   clobbers back on the next line. Documented, not guarded.
+
+8. A blocked `fread Stdin` parks the GLOBAL effect runner (§11.7):
+   every other queued effect — a `sleep`, a concurrent `fwrite` —
+   waits behind it. This is the cost of "blocking reads available"
+   under the single-runner design, not a new hazard class; it
+   unifies with §11.7's open runner-scope question rather than
+   adding a new one. Flip would follow §11.7's resolution (per-bag
+   or per-effect-class runners).
+
+9. The std fds are ORDINARY fd-table entries: last `fopen` on the
+   name wins (closing the std OS handle first), `fclose Stdout`
+   makes every later `say`/`fwrite` an honest runner-safe fatal,
+   `fread Stdin` fatals after a close. Nothing std is special
+   (issue #18's words). Alternative: uncloseable std fds (an
+   `fdProtected` flag) — flip: check the flag in EffFclose and make
+   the close a no-op or fatal.
+
+10. Tests inject std output via Handles, not callbacks: `hookSay`
+    is GONE, replaced by `hookStdin`/`hookStdout`/`hookStderr`
+    Handles the std fds are preregistered with (capture = a scratch
+    temp file read back after the run). Consequence: the §13.12
+    say-format-error story changed shape — `formatSay` still runs
+    at effect time, so its Haskell-level errors still kill the
+    effect runner (the §13.12 tale stands), but a capture now sees
+    the fd's byte stream, where a say's trailing newline is the only
+    separator (embedded newlines split like any line break — two
+    test expectations updated for exactly this reason).
+    `hookPanic` stays a callback: panic is fatal, never routed
+    (§13.14), and stays hook-based.
+
+11. The std fds are preregistered BINARY (`hSetBinaryMode` at RTS
+    creation, on the hooked handles — including the process's real
+    stdin/stdout/stderr). Consequence: the CLI writes UTF-8 bytes
+    regardless of locale. Alternative: text-mode with locale
+    encoding — non-deterministic across environments; flip would
+    drop the hSetBinaryMode pass in `newRTSWith` and re-encode in
+    EffSay/EffFwrite.
