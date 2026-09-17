@@ -1,46 +1,27 @@
 # Lindana
+A recreational programming language about race conditions.
 
-A recreational programming language about race conditions. The design
-lives in [`agent-history/lindana-handover.md`](agent-history/lindana-handover.md)
-— the spec-of-record — and the implementation history lives alongside
-it in [`agent-history/`](agent-history/). The current state of the
-language is described in [`REFERENCE.md`](REFERENCE.md), a
-model-maintained language reference. `lindana <file.lind>` runs
-programs.
+The main idea is that everything is done by declaring *machines*,
+which each stand by one Linda-style *bag*, from which they try to grab *tuples* to work on.
+Upon grabbing a tuple, a machine may take one action, and it may place zero or more tuples back in its bag.
 
-# The Handwritten Part of the README
+[CHAM](https://www.sciencedirect.com/science/article/pii/030439759290185I) is a similar formal model to what we're doing here.
+
+## How do I use it?
+The current state of the language is described in [`REFERENCE.md`](REFERENCE.md).
+A *good* handwritten intro doc is a TODO. You can also check out `examples`.
+
+Good uses are "for fun." This is a recreational art project: your ability to ship anything useful is an unfortunate accident. Ship something funny instead. No warranties.
 
 ## AI?
 Yes. In the tradition of "if you're going to give me a pile of AI output to read, at least give me the prompts," see `/agent-history`. 
+	
 
 ## Contributing?
 Feel free!
 
-## Where Should I Look To Figure Out What's Going On Here; I'm A Baby Agent Session Goo Goo Ga Ga
-Look in `/agent-history`. If a README or a messageboard exists there, check it out.
-If not, `/agent-history/lindana-handover.md` is probably a good start, so you can get a sense of the actual goals of the project (recreational chaos).
-You have access to the other agent sessions, just like human readers, but they're probably pretty big, so be careful about blindly pulling too much into context. 
-Git history might be a better source-of-truth about recent progress until I've established some kind of plan here.
-
-# Building
-
 ```sh
 stack build
 stack test
-stack exec lindana -- examples/bags.lind
-```
-
-# Trying the parser in ghci
-
-```sh
-stack ghci
-```
-
-```haskell
-ghci> :set -XOverloadedStrings
-ghci> import qualified Data.Text as T
-ghci> import Lindana.Parser (parseProgram)
-ghci> import Lindana.Syntax
-ghci> fmap renderProgram (parseProgram "(Tick,), (ResetEpoch, n) : (ResetEpoch, n + 1)")
-"(Tick,), rd..." -- renders the parsed AST back to source
+stack exec lindana -- examples/hello.lind
 ```
