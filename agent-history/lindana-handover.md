@@ -1101,3 +1101,11 @@ output. One new table (`rtsSayFd`), one new action (`sayfd`), the
   read parking cost), `die` vs `quit` (§11.9), bytestring
   reclamation (§11.11), fresh-name generation, parser-error-message
   plumbing (sayfd joins the reserved-word pile).
+
+### 13.19 Done — README cleanup (issue #30), branch `docs/readme-cleanup`
+
+- The README had grown into a second source-of-truth: a module-by-module Layout section and a giant Grammar-status run-on duplicated the handover's job and needed updating every slice. Per the issue, the README is no longer a source-of-truth — the human wants to handwrite a fresh one on the blank slate.
+- **What moved**: the Layout section (module map + examples inventory) and the Grammar status section (implemented/not-yet/provisional inventory) left `README.md` and landed in `agent-history/readme-status.md` as a **frozen snapshot as of §13.18** — deliberately not maintained going forward; the handover's §13 stays the live record. One copy-paste artifact fixed in passing (a duplicated prelude sentence in the §13.15 entry).
+- **What stayed**: the pitch + pointer to the handover, the handwritten part ("AI?", "Contributing?", the baby-agent section) verbatim, and the two usage how-tos (Building, parser-in-ghci). Everything else is gone — deliberately small; expect the handwritten rewrite to replace all of it.
+- No code changes; docs-only slice. Full test suite green, zero `-Wall` warnings, no new examples (nothing to verify via CLI beyond the suite).
+- **Next**: nothing opened. When the handwritten README lands, `agent-history/readme-status.md` can be deleted or left to rot — it is a freeze, not a pointer.
