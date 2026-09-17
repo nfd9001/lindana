@@ -322,6 +322,37 @@ main = hspec $ do
         progDecls (mangleProgram "_v2" p) `shouldBe`
           [Machine [] [Reroute (EAtom "Error_v2") (EAtom "Log_v2")]]
 
+    describe "file-descriptor verbs (§13.17, issue #18)" $ do
+      it "parses fopen with handle, string path, mode atom" $ do
+        p <- parseOk ": fopen Log \"log.txt\" W"
+        progDecls p `shouldBe`
+          [Machine [] [FOpen "Log" (str "log.txt") (EAtom "W")]]
+      it "accepts expressions for path and mode (data, not grammar)" $ do
+        p <- parseOk "(p, m,) : fopen Log p m"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PVar "p", PVar "m"])]
+                   [FOpen "Log" (EVar "p") (EVar "m")]]
+      it "parses fclose/fread/fwrite with expression handles" $ do
+        p <- parseOk ": [fclose Log; fread Log; fwrite Log Buf]"
+        progDecls p `shouldBe`
+          [Machine [] [FClose (EAtom "Log"), FRead (EAtom "Log"),
+                       FWrite (EAtom "Log") (EAtom "Buf")]]
+      it "reserves the fd verbs (no variable named fopen/fclose/fread/fwrite)" $ do
+        isLeft (parseProgram "(fopen,) : die") `shouldBe` True
+        isLeft (parseProgram "(fclose,) : die") `shouldBe` True
+        isLeft (parseProgram "(fread,) : die") `shouldBe` True
+        isLeft (parseProgram "(fwrite,) : die") `shouldBe` True
+      it "round-trips" $
+        roundTrips ": [fopen Log \"log.txt\" R; fwrite Log Buf; fclose Log]"
+          `shouldBe` True
+      it "mangles: the fopen handle and expr handles mangle; the path literal and mode do not" $ do
+        p <- parseOk ": [fopen Log \"log.txt\" R; fwrite Log Buf; fread Log; fclose Log]"
+        progDecls (mangleProgram "_v2" p) `shouldBe`
+          [Machine [] [FOpen "Log_v2" (str "log.txt") (EAtom "R"),
+                       FWrite (EAtom "Log_v2") (EAtom "Buf_v2"),
+                       FRead (EAtom "Log_v2"),
+                       FClose (EAtom "Log_v2")]]
+
     it "parses a no-LHS machine (§1 one-shot): the issue #7 Hello World" $ do
       p <- parseOk $ T.unlines
         [ ": [say \"Hello world!\"; (Stop, 0)]"

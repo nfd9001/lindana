@@ -1,0 +1,16 @@
+-- §13.17 (issue #18): file descriptors. fopen/fwrite/fclose/fread,
+-- gated on the (Fopen, H) / (Fwrote, H) / (Fread, H) completion tuples
+-- in Global, data pushed and pulled through the §9 bytestring
+-- side-table. The file is created next to this program and left
+-- behind — open it to see what the machines wrote.
+
+: fopen Log "files-out.tmp" W
+(Fopen, Log) : bytesBind Line "first line from the machines"
+(Bytes, Line) : fwrite Log Line
+(Fwrote, Log) : [fclose Log; fopen Back "files-out.tmp" R]
+-- The first fread pulls the whole file (the read fd is spent — strict
+-- hGetContents closes the OS handle as it reads); the second sees the
+-- empty remainder.
+(Fopen, Back) : [fread Back; (Show,)]
+(Show,) : [say "read back: %b" Back; fread Back; (Empty,)]
+(Empty,) : [say "second fread (fd spent): [%b]" Back; exit 0]

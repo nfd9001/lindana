@@ -147,7 +147,9 @@ import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import System.Random (StdGen, mkStdGen, uniformR)
 import System.Exit (ExitCode (..))
-import System.IO (hPutStrLn, stderr)
+import System.IO (Handle, IOMode (ReadMode, WriteMode), hClose, hFlush,
+                  hSetBinaryMode, hPutStrLn, openFile, stderr)
+import qualified Data.ByteString as BS
 
 import Lindana.Def (MachineDef (..), globalBag, errorBag)
 import Lindana.Import (lowerModule, parseModuleFile, parseModuleSource)
@@ -209,6 +211,19 @@ data RTS = RTS
                                       --   @reroute Src Tgt@ (last update
                                       --   wins: plain 'Map.insert'), read
                                       --   by the @error@ verb's routing.
+  , rtsFds :: TVar (Map Name FdState) -- ^ §13.17 fd table (issue #18):
+                                      --   opaque atom handle → open OS
+                                      --   handle + mode. To the matcher a
+                                      --   handle is just an ordinary atom;
+                                      --   only the @f*@ verbs reach in.
+                                      --   Empty at start — the std fds
+                                      --   (Stdin/Stdout/Stderr) are the
+                                      --   issue's next slice. Nothing is
+                                      --   special: last @fopen@ on a name
+                                      --   wins, closing the superseded OS
+                                      --   handle first (a silent leak
+                                      --   would keep the file locked and
+                                      --   un-reopenable; flip-worthy).
   , rtsHooks :: Hooks
   }
 
@@ -259,11 +274,13 @@ newRTSWith hooks = atomically $ do
   mods  <- newTVar Map.empty
   extra <- newTVar []
   reroute <- newTVar Map.empty
+  fds   <- newTVar Map.empty
   pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
            , rtsLive = live, rtsExit = exit, rtsStop = stop
            , rtsBags = bags, rtsBytes = bytes
            , rtsMods = mods, rtsExtra = extra
            , rtsReroute = reroute, rtsHooks = hooks
+           , rtsFds = fds
            }
 
 -- | Resolve a bag name to its 'RBag' (§6). @Global@ is the main bag;
@@ -337,7 +354,55 @@ data Effect
                           --   read at effect time, so a rebind between
                           --   commit and run is honored. Fails as a
                           --   runner-safe fatal (see module header).
+  | EffFopen Name String FdMode
+                          -- ^ @fopen H Path Mode@ (§13.17) — open the
+                          --   file (path + mode resolved in-transaction,
+                          --   the @bytesBind@ precedent) and register it
+                          --   in 'rtsFds' under the atom handle; emits
+                          --   @(Fopen, H)@ into @Global@. Failure
+                          --   (missing file, bad mode) is a runner-safe
+                          --   fatal, the §13.13 import precedent.
+  | EffFclose Name        -- ^ @fclose H@ (§13.17) — close and drop;
+                          --   unknown handle is a no-op (idempotent).
+  | EffFread Name         -- ^ @fread H@ (§13.17) — read the entire
+                          --   remaining content through a read-mode
+                          --   handle into the bytestring side-table under
+                          --   the same handle (clobbering); emits
+                          --   @(Fread, H)@ into @Global@.
+  | EffFwrite Name Name   -- ^ @fwrite H S@ (§13.17) — write the bytes
+                          --   named by @S@ (bytestring side-table) through
+                          --   write-mode handle @H@, flushed; emits
+                          --   @(Fwrote, H)@ into @Global@.
   deriving (Eq, Show)
+
+--------------------------------------------------------------------------------
+-- File descriptors (§13.17, issue #18)
+--------------------------------------------------------------------------------
+
+-- | How an fd-table entry was opened. Provisionally just @R@ (read,
+-- position at start; @fread@ reads the entire remaining content — for
+-- a regular file that's the whole file) and @W@ (write, truncating;
+-- append is the obvious flip-worthy third mode, recorded on the
+-- messageboard).
+data FdMode = FdRead | FdWrite
+  deriving (Eq, Show)
+
+-- | One fd-table entry: the OS handle and the mode it was opened in.
+-- The table is keyed by the Lindana atom handle @fopen@ declared.
+-- @fdSpent@ marks a read-mode handle whose entire remaining content
+-- has already been pulled by @fread@: strict 'BS.hGetContents' closes
+-- the OS handle as it reads, and the honest "remaining content" of a
+-- spent read fd is the empty bytestring — further @fread@s clobber
+-- the handle's side-table entry with @""@ and emit the completion
+-- tuple again (fclose on a spent handle is a harmless no-op).
+data FdState = FdState
+  { fdHandle :: Handle
+  , fdMode   :: FdMode
+  , fdSpent  :: Bool
+  }
+
+instance Show FdState where
+  show (FdState _ m _) = "FdState { fdMode = " ++ show m ++ " }"
 
 --------------------------------------------------------------------------------
 -- The interpreter (action layer, §3.3 + §7)
@@ -545,6 +610,28 @@ interpretActions rts bag sfx bagName env = go []
         tgt <- atomName tv
         modifyTVar' (rtsReroute rts) (Map.insert src tgt)
         go acc rest
+      FOpen h pE mE -> do
+        -- §13.17: path and mode resolve in-transaction (the bytesBind
+        -- precedent — the declaration site's data is fixed at commit);
+        -- the OS open happens in the effect runner. Emitting a
+        -- completion tuple lets consumers gate like on (Bytes, H).
+        pv <- evalR rts env pE
+        mv <- evalR rts env mE
+        m <- case mv of
+          VAtom "R" -> pure FdRead
+          VAtom "W" -> pure FdWrite
+          _ -> error "fopen: mode must be the atom R or W (§13.17, §3.3)"
+        go (EffFopen h (casualString pv) m : acc) rest
+      FClose hE -> do
+        hv <- evalR rts env hE
+        go (EffFclose (atomHandle hv) : acc) rest
+      FRead hE -> do
+        hv <- evalR rts env hE
+        go (EffFread (atomHandle hv) : acc) rest
+      FWrite hE sE -> do
+        hv <- evalR rts env hE
+        sv <- evalR rts env sE
+        go (EffFwrite (atomHandle hv) (atomHandle sv) : acc) rest
       If c th el -> do
         b <- truthy <$> evalR rts env c
         go acc ((if b then th else el) ++ rest)
@@ -778,6 +865,97 @@ runBundle rts = go
               Right (Left err) -> importFailed rts err
               Left exc         -> importFailed rts (show (exc :: SomeException))
         go es
+      EffFopen h path mode -> do
+        -- §13.17: fallible FD effects are runner-safe fatals (§13.13
+        -- import precedent): panic hook + exit 1, never a silent
+        -- runner death. Last fopen on a handle wins — and the
+        -- superseded OS handle is CLOSED first (not merely replaced):
+        -- a silent leak would keep the file locked (GHC's per-Handle
+        -- locking) and un-reopenable. Provisional, flip-worthy:
+        -- "second fopen fails loudly" is the obvious alternative.
+        old <- Map.lookup h <$> readTVarIO (rtsFds rts)
+        case old of
+          Just fd -> do
+            _ <- try (hClose (fdHandle fd)) :: IO (Either SomeException ())
+            pure ()
+          Nothing -> pure ()
+        r <- try (do hh <- openFile path (fdIOMode mode)
+                     hSetBinaryMode hh True
+                     pure hh)
+        case r of
+          Right hh -> do
+            atomically $ do
+              modifyTVar' (rtsFds rts) (Map.insert h (FdState hh mode False))
+              b <- bagForSTM rts globalBag
+              outSTM b (VTuple [VAtom "Fopen", VAtom h])
+            go es
+          Left exc -> fdFailed rts ("fopen " ++ h ++ " " ++ show path ++ ": "
+                                    ++ show (exc :: SomeException))
+      EffFclose h -> do
+        -- Idempotent close (the bytesDestroy precedent): an unknown
+        -- handle is a no-op, later operations are the user's to guard
+        -- (they'll fatal via the missing-handle checks below).
+        fds <- readTVarIO (rtsFds rts)
+        case Map.lookup h fds of
+          Nothing -> go es
+          Just fd -> do
+            _ <- try (hClose (fdHandle fd)) :: IO (Either SomeException ())
+            atomically (modifyTVar' (rtsFds rts) (Map.delete h)) >> go es
+      EffFread h -> do
+        fds <- readTVarIO (rtsFds rts)
+        case Map.lookup h fds of
+          Nothing -> fdFailed rts ("fread: unknown fd handle " ++ h)
+          Just fd | fdMode fd /= FdRead ->
+            fdFailed rts ("fread: handle " ++ h ++ " is not open for reading")
+                  | fdSpent fd -> do
+            -- Spent read fd: the empty remainder. Still clobber the
+            -- side-table entry and emit the gate tuple — the content
+            -- really is "" now.
+            atomically $ do
+              modifyTVar' (rtsBytes rts) (Map.insert h BS.empty)
+              b <- bagForSTM rts globalBag
+              outSTM b (VTuple [VAtom "Fread", VAtom h])
+            go es
+                  | otherwise -> do
+            r <- try (BS.hGetContents (fdHandle fd))
+            case r of
+              Right bs -> do
+                -- Content lands in the bytestring side-table under the
+                -- SAME handle (clobbering): `say %b H` reads it back,
+                -- and (Fread, H) is the deterministic gate. The fd is
+                -- now spent ('BS.hGetContents' closed it); see
+                -- 'FdState'.
+                atomically $ do
+                  modifyTVar' (rtsBytes rts) (Map.insert h bs)
+                  modifyTVar' (rtsFds rts)
+                              (Map.insert h fd { fdSpent = True })
+                  b <- bagForSTM rts globalBag
+                  outSTM b (VTuple [VAtom "Fread", VAtom h])
+                go es
+              Left exc -> fdFailed rts ("fread " ++ h ++ ": "
+                                        ++ show (exc :: SomeException))
+      EffFwrite h src -> do
+        fds <- readTVarIO (rtsFds rts)
+        bytes <- readTVarIO (rtsBytes rts)
+        case (,) <$> Map.lookup h fds <*> Map.lookup src bytes of
+          Nothing ->
+            fdFailed rts ("fwrite: unknown " ++
+              (case Map.lookup h fds of
+                 Nothing -> "fd handle " ++ h
+                 Just _  -> "bytestring handle " ++ src))
+          Just (fd, bs)
+            | fdMode fd /= FdWrite ->
+                fdFailed rts ("fwrite: handle " ++ h ++ " is not open for writing")
+            | otherwise -> do
+                r <- try (BS.hPut (fdHandle fd) bs >> hFlush (fdHandle fd))
+                case r of
+                  Right () -> do
+                    atomically $ do
+                      b <- bagForSTM rts globalBag
+                      outSTM b (VTuple [VAtom "Fwrote", VAtom h])
+                    go es
+                  Left exc -> fdFailed rts ("fwrite " ++ h ++ ": "
+                                            ++ show (exc :: SomeException))
 
 -- | §13.13, the @import@ effect's load path. Left = failure message
 -- (turned into a fatal @panic@ by 'runBundle'). Reads the name and
@@ -879,6 +1057,22 @@ importFailed rts err = do
   atomically $ do
     modifyTVar' (rtsLive rts) (subtract 1)
     writeTVar (rtsExit rts) (Just (ExitFailure 1))
+
+-- | §13.17: a failed FD effect is fatal but /runner-safe/ — same
+-- shape as 'importFailed', minus the pending slot (FD effects spawn
+-- no machines, and the graceful effect-runner drain already runs
+-- every queued bundle before a run returns, so no live-count slot is
+-- needed).
+fdFailed :: RTS -> String -> IO ()
+fdFailed rts err = do
+  hookPanic (rtsHooks rts) err
+  atomically (writeTVar (rtsExit rts) (Just (ExitFailure 1)))
+
+-- | §13.17: the 'FdMode' → 'IOMode' mapping. @W@ truncates; append
+-- mode is the obvious flip-worthy extension (messageboard).
+fdIOMode :: FdMode -> IOMode
+fdIOMode FdRead  = ReadMode
+fdIOMode FdWrite = WriteMode
 
 setExit :: RTS -> ExitCode -> STM ()
 setExit rts c = writeTVar (rtsExit rts) (Just c)

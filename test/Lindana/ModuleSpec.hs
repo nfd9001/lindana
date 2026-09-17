@@ -20,7 +20,9 @@ import Data.IORef
 import Data.List (isInfixOf, sort)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
+import System.Directory (getTemporaryDirectory)
 import System.Exit (ExitCode (..))
+import System.IO (hClose, openBinaryTempFile)
 import System.Timeout (timeout)
 
 import Test.Hspec
@@ -250,3 +252,35 @@ spec = describe "module import (§13.13, issue #17)" $ do
       -- §6.4 default on Error_v2 would have panicked instead.
       Map.lookup "Tmp_v2" (rrBags rr) `shouldBe` Just []
       Map.lookup "Error_v2" (rrBags rr) `shouldBe` Just []
+
+  -- §13.17 (issue #18): fds travel as data across the import boundary.
+  -- The module's fwrite mentions only variables (its own atom mentions
+  -- would mangle); the caller opens the file, opens the fd and payload
+  -- atoms as data, and reads the written content back through a fresh
+  -- read-mode handle.
+  it "a module fwrites through a caller-passed fd (fd-as-data)" $ do
+    path <- tmpFdPath
+    (said, panics, rr) <- runMain $ unlines $
+      preamble "fdwriter" "_v2" ++
+      [ importLine
+      , ": fopen F \"" ++ path ++ "\" W"
+      , "(Fopen, F) : bytesBind Payload \"hello from the top level\""
+      , "(Bytes, Payload), (Imported, Mod, \"_v2\") :"
+      , "  lob Boot_v2 (Go_v2, F, Payload, Reply)"
+      , "Reply { (Done_v2, f) : [fclose f; fopen G \"" ++ path ++ "\" R; fread G; (Read,)]"
+      -- The reader lives in Reply too: the (Read,) tuple is out'd into
+      -- the emitting machine's OWN bag (§6), not Global.
+      , "        (Read,) : [say \"%b\" G; exit 0] }"
+      ]
+    said `shouldBe` ["hello from the top level"]
+    panics `shouldBe` []
+    rrExit rr `shouldBe` ExitSuccess
+
+-- | A unique scratch file (created empty) for the §13.17 fd test,
+-- left in the OS temp dir — empty and harmless.
+tmpFdPath :: IO FilePath
+tmpFdPath = do
+  d <- getTemporaryDirectory
+  (p, h) <- openBinaryTempFile d "lindana-fd-mod-test"
+  hClose h
+  pure p

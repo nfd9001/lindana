@@ -1,0 +1,10 @@
+-- fdwriter: the §13.17 module test fixture. The module writes through
+-- an fd it is handed as DATA — a module cannot open its own named
+-- handle to a caller-chosen path (its fopen handle would mangle), so
+-- the caller opens the file and passes the fd atom and the source
+-- bytestring atom in a tuple; the module's fwrite mentions only
+-- variables. Same shape as the reply-bag-as-data pattern (§13.13),
+-- with the fd standing in for the bag.
+Boot {
+  (Go, fd, src, reply) : [fwrite fd src; lob reply (Done, fd)]
+}

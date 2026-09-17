@@ -88,7 +88,10 @@ Git history might be a better source-of-truth about recent progress until I've e
   `sort.lind` (§13.16, issue #24) is a bubble sort as pure machines
   (ordering comparisons are load-bearing: `<`/`<=` decide each swap,
   base cases live in `if` bodies per the §13.12 race lesson) plus a
-  `bytesCompare` lexicographic demo; `brainfuck.lind`
+  `bytesCompare` lexicographic demo; `files.lind` (§13.17, issue #18)
+  opens a file, writes a bytestring through it, reopens for reading
+  and pulls the content back (the second `fread` shows the spent-fd
+  empty remainder); `brainfuck.lind`
   (§13.12) is a Brainfuck interpreter — zipper program and tape,
   jump-table brackets, CPS reversal via `!` splice — that runs the
   classic Hello World!; `throttle.lind` (§8.2) is a
@@ -160,7 +163,16 @@ top-level file, prefixless — one-shot preregistration machines only
 (`Newline`, `Version`); `{-# no-prelude #-}` opts out, an explicit
 `import Prelude Nil […]` after the pragma brings it back with a hide
 list; the prelude is a builtin module — source in the RTS, resolved
-by the import effect before disk).
+list; the prelude is a builtin module — source in the RTS, resolved
+by the import effect before disk), and file descriptors (§13.17,
+issue #18, provisional: `fopen H Path Mode` opens a file (`R` reads,
+`W` truncates) under an opaque atom handle in the fd table;
+`fread`/`fwrite`/`fclose` take the handle as an expression — fds
+travel as data; `fread` pulls the entire remaining content into the
+bytestring side-table under the SAME handle (clobbering — `say %b`
+reads it back) and spends the fd; effects emit `(Fopen, H)` /
+`(Fread, H)` / `(Fwrote, H)` completion tuples into `Global`; a
+failed FD effect is a runner-safe fatal, exit 1).
 Effect bundles need no syntax (§11.6, provisionally resolved): a
 reaction's post-commit action list *is* the bundle.
 

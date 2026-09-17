@@ -181,6 +181,19 @@ mangleAction sfx a = case a of
   -- bags); it cannot name the real top-level Error, consistent with
   -- the no-Global-exemption story (module header).
   Reroute src tgt -> Reroute (mangleExpr sfx src) (mangleExpr sfx tgt)
+  -- §13.17 (issue #18): the fd handle mangles (the bytesBind
+  -- precedent — declaring a handle is the declaration site's job), the
+  -- path expression mangles its atoms but not the string literal (data),
+  -- and the MODE position is exempt: @R@/@W@ are runtime-checked
+  -- keywords, not bag names — mangling them would break every module's
+  -- fopen (the hide-list precedent). The other three verbs take the
+  -- handle as an expression: handles-as-data, mangled like any atom
+  -- mention (a module operates on ITS handles; the caller passes its
+  -- own mangled names as data).
+  FOpen h p m    -> FOpen (h ++ sfx) (mangleExpr sfx p) m
+  FClose e       -> FClose (mangleExpr sfx e)
+  FRead e        -> FRead (mangleExpr sfx e)
+  FWrite h s     -> FWrite (mangleExpr sfx h) (mangleExpr sfx s)
   Say f es       -> Say f (map (mangleExpr sfx) es)   -- format is data
   Out e          -> Out (mangleExpr sfx e)
   Exit e         -> Exit (mangleExpr sfx e)

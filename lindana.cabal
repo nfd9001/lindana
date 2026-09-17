@@ -51,6 +51,8 @@ test-suite lindana-test
                     , lindana
                     , async
                     , containers
+                    , bytestring
+                    , directory
                     , stm
                     , hspec
                     , megaparsec >=9.0 && <9.3

@@ -9,12 +9,16 @@
 -- program exits).
 module Lindana.MachineSpec (spec) where
 
+import Data.Char (ord)
+import qualified Data.ByteString as BS
 import Data.IORef
 import qualified Data.Map.Strict as Map
-import Data.List (sort)
+import Data.List (isInfixOf, sort)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
+import System.Directory (getTemporaryDirectory)
 import System.Exit (ExitCode (..))
+import System.IO (hClose, openBinaryTempFile)
 import System.Timeout (timeout)
 
 import Test.Hspec
@@ -44,6 +48,11 @@ int = EInt
 consL :: [Expr] -> Expr
 consL = foldr (\e acc -> ETuple [e, acc]) (EAtom "Nil")
 
+-- | A string literal in its desugared shape (§9): a casual-string
+-- cons-list of codepoints as an expression.
+str :: String -> Expr
+str = consL . map (int . toInteger . ord)
+
 machine :: [PatElem] -> [Action] -> MachineDef
 machine = MachineDef globalBag ""
 
@@ -68,8 +77,18 @@ captureHooks = do
   let hooks = Hooks
         { hookSay   = \s -> modifyIORef' said (s :)
         , hookPanic = \m -> modifyIORef' panics (m :)
+        , hookModDir = "."
         }
   pure (hooks, said, panics)
+
+-- | §13.17: a unique scratch file path (created empty), for fopen
+-- tests. Left in the OS temp dir — empty and harmless.
+tmpPath :: IO FilePath
+tmpPath = do
+  d <- getTemporaryDirectory
+  (p, h) <- openBinaryTempFile d "lindana-fd-test"
+  hClose h
+  pure p
 
 --------------------------------------------------------------------------------
 -- The machine loop (§1)
@@ -635,3 +654,142 @@ spec = do
                  [Die] ]
       r <- runProgram [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple [VAtom "Same"]]
+
+  describe "file descriptors (§13.17, issue #18)" $ do
+    it "writes then reads back a file through the bytestring side-table" $ do
+      (hooks, said, _) <- captureHooks
+      path <- tmpPath
+      let w = machine [] [ FOpen "F" (str path) (EAtom "W"), Die ]
+          b = machine (take1 (PTuple [a "Fopen", a "F"]))
+                [ BytesBind "S" (str "hello"), Die ]
+          wr = machine (take1 (PTuple [a "Bytes", a "S"]))
+                 [ FWrite (EAtom "F") (EAtom "S"), Die ]
+          cl = machine (take1 (PTuple [a "Fwrote", a "F"]))
+                 [ FClose (EAtom "F"), FOpen "G" (str path) (EAtom "R"), Die ]
+          rd = machine (take1 (PTuple [a "Fopen", a "G"]))
+                 [ FRead (EAtom "G"), Die ]
+          out = machine (take1 (PTuple [a "Fread", a "G"]))
+                 [ Say "%b" [EAtom "G"], Exit (int 0) ]
+      r <- runGlobal hooks [w, b, wr, cl, rd, out] []
+      rrExit r `shouldBe` ExitSuccess
+      readIORef said >>= pure . reverse >>= (`shouldBe` ["hello"])
+      Map.lookup "G" (rrBytes r) `shouldBe` Just "hello"
+    it "content survives the round-trip as UTF-8 bytes" $ do
+      (hooks, _, _) <- captureHooks
+      path <- tmpPath
+      let content = "h\xE9llo \x2192 \x2603"
+          w = machine [] [ FOpen "F" (str path) (EAtom "W"), Die ]
+          b = machine (take1 (PTuple [a "Fopen", a "F"]))
+                [ BytesBind "S" (str content), Die ]
+          wr = machine (take1 (PTuple [a "Bytes", a "S"]))
+                 [ FWrite (EAtom "F") (EAtom "S"), FClose (EAtom "F")
+                 , FOpen "G" (str path) (EAtom "R"), FRead (EAtom "G")
+                 , Exit (int 0) ]
+      r <- runGlobal hooks [w, b, wr] []
+      rrExit r `shouldBe` ExitSuccess
+      Map.lookup "G" (rrBytes r) `shouldBe` Just (encodeUtf8 (T.pack content))
+    it "a second fread sees the empty remainder (content is consumed)" $ do
+      (hooks, said, _) <- captureHooks
+      path <- tmpPath
+      let w = machine [] [ FOpen "F" (str path) (EAtom "W"), Die ]
+          b = machine (take1 (PTuple [a "Fopen", a "F"]))
+                [ BytesBind "S" (str "abc"), Die ]
+          wr = machine (take1 (PTuple [a "Bytes", a "S"]))
+                 [ FWrite (EAtom "F") (EAtom "S"), Die ]
+          cl = machine (take1 (PTuple [a "Fwrote", a "F"]))
+                 [ FClose (EAtom "F"), FOpen "G" (str path) (EAtom "R"), Die ]
+          rd = machine (take1 (PTuple [a "Fopen", a "G"]))
+                 [ FRead (EAtom "G"), FRead (EAtom "G"), Die ]
+          out = machine (take1 (PTuple [a "Fread", a "G"]))
+                 [ Say "[%b]" [EAtom "G"], Exit (int 0) ]
+      r <- runGlobal hooks [w, b, wr, cl, rd, out] []
+      rrExit r `shouldBe` ExitSuccess
+      readIORef said >>= pure . reverse >>= (`shouldBe` ["[]"])
+      Map.lookup "G" (rrBytes r) `shouldBe` Just ""
+    it "fopen on a missing file is a runner-safe fatal: exit 1, no silent runner death" $ do
+      (hooks, _, panics) <- captureHooks
+      let m = machine [] [ FOpen "F" (str "/nonexistent/lindana-fd/xyz") (EAtom "R"), Die ]
+      r <- runGlobal hooks [m] []
+      rrExit r `shouldBe` ExitFailure 1
+      readIORef panics >>= pure . reverse >>= (`shouldSatisfy` not . null)
+    it "fread on a write-mode handle is a runner-safe fatal" $ do
+      (hooks, _, panics) <- captureHooks
+      path <- tmpPath
+      let m = machine [] [ FOpen "F" (str path) (EAtom "W"), FRead (EAtom "F"), Die ]
+      r <- runGlobal hooks [m] []
+      rrExit r `shouldBe` ExitFailure 1
+      readIORef panics >>= pure . reverse >>=
+        (`shouldSatisfy` any ("not open for reading" `isInfixOf`))
+    it "fwrite on a read-mode handle is a runner-safe fatal" $ do
+      (hooks, _, panics) <- captureHooks
+      path <- tmpPath
+      let m = machine [] [ FOpen "F" (str path) (EAtom "R")
+                         , BytesBind "S" (str "x")
+                         , FWrite (EAtom "F") (EAtom "S"), Die ]
+      r <- runGlobal hooks [m] []
+      rrExit r `shouldBe` ExitFailure 1
+      readIORef panics >>= pure . reverse >>=
+        (`shouldSatisfy` any ("not open for writing" `isInfixOf`))
+    it "fwrite through an unknown fd handle is a runner-safe fatal" $ do
+      (hooks, _, panics) <- captureHooks
+      path <- tmpPath
+      let m = machine [] [ FOpen "F" (str path) (EAtom "W")
+                         , BytesBind "S" (str "x")
+                         , FWrite (EAtom "Nope") (EAtom "S"), Die ]
+      r <- runGlobal hooks [m] []
+      rrExit r `shouldBe` ExitFailure 1
+      readIORef panics >>= pure . reverse >>=
+        (`shouldSatisfy` any ("unknown fd handle" `isInfixOf`))
+    it "fwrite from an unknown bytestring handle is a runner-safe fatal" $ do
+      (hooks, _, panics) <- captureHooks
+      path <- tmpPath
+      let m = machine [] [ FOpen "F" (str path) (EAtom "W")
+                         , FWrite (EAtom "F") (EAtom "Nope"), Die ]
+      r <- runGlobal hooks [m] []
+      rrExit r `shouldBe` ExitFailure 1
+      readIORef panics >>= pure . reverse >>=
+        (`shouldSatisfy` any ("unknown bytestring handle" `isInfixOf`))
+    it "fclose is idempotent: closing an unknown handle is a no-op" $ do
+      (hooks, _, panics) <- captureHooks
+      let m = machine [] [ FClose (EAtom "Nope"), Exit (int 0) ]
+      r <- runGlobal hooks [m] []
+      rrExit r `shouldBe` ExitSuccess
+      readIORef panics >>= pure . reverse >>= (`shouldBe` [])
+    it "handles travel as data: variables fwrite through the fd and bytes they were given" $ do
+      (hooks, said, _) <- captureHooks
+      path <- tmpPath
+      let w = machine [] [ FOpen "F" (str path) (EAtom "W"), Die ]
+          b = machine (take1 (PTuple [a "Fopen", a "F"]))
+                [ BytesBind "S" (str "data!"), Die ]
+          -- The fd and the source bytestring both arrive as atoms in
+          -- tuples; the action mentions only variables.
+          wr = machine (take1 (PTuple [a "Go", v "h"])
+                        ++ take1 (PTuple [a "Bytes", v "s"]))
+                 [ FWrite (EVar "h") (EVar "s"), Die ]
+          cl = machine (take1 (PTuple [a "Fwrote", a "F"]))
+                 [ FClose (EAtom "F"), FOpen "G" (str path) (EAtom "R"), Die ]
+          rd = machine (take1 (PTuple [a "Fopen", a "G"]))
+                 [ FRead (EAtom "G"), Die ]
+          out = machine (take1 (PTuple [a "Fread", a "G"]))
+                 [ Say "%b" [EAtom "G"], Exit (int 0) ]
+      r <- runGlobal hooks [w, b, wr, cl, rd, out]
+             [t [EAtom "Go", EAtom "F"]]
+      rrExit r `shouldBe` ExitSuccess
+      readIORef said >>= pure . reverse >>= (`shouldBe` ["data!"])
+    it "a repeated fopen on the same handle wins last (both completions emit)" $ do
+      (hooks, _, panics) <- captureHooks
+      pathA <- tmpPath
+      pathB <- tmpPath
+      let f1 = machine [] [ FOpen "F" (str pathA) (EAtom "W"), Die ]
+          f2 = machine [PatElem Read (PTuple [a "Fopen", a "F"])]
+                 [ FOpen "F" (str pathB) (EAtom "W"), Die ]
+          b  = machine (take1 (PTuple [a "Fopen", a "F"])
+                        ++ take1 (PTuple [a "Fopen", a "F"]))
+                 [ BytesBind "S" (str "b"), FWrite (EAtom "F") (EAtom "S")
+                 , FClose (EAtom "F"), Exit (int 0) ]
+      r <- runGlobal hooks [f1, f2, b] []
+      rrExit r `shouldBe` ExitSuccess
+      readIORef panics >>= pure . reverse >>= (`shouldBe` [])
+      -- The write landed through pathB's handle: last fopen wins.
+      BS.readFile pathB `shouldReturn` "b"
+      BS.readFile pathA `shouldReturn` ""
