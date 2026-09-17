@@ -67,6 +67,17 @@
 --     machines only — a looping service in the default import would
 --     keep every program alive forever.
 --
+--   * Idle-exempt machines (§11.12, branch `runtime/idle-shutdown`):
+--     the §6.4 default Error machine has @machIdle = True@ — it is
+--     not counted in 'rtsLive' and does not keep the run alive, so a
+--     program whose user machines all @die@ ends cleanly even though
+--     the default machine is still parked. The run-alive check waits
+--     for idle bags to drain first, so a final error tuple still
+--     gets its guaranteed panic. Why: the parked default machine
+--     otherwise false-deadlocks every all-die program (the §1
+--     shutdown story told machines to end in @die@, and the most
+--     natural shape for that had no Error block and no @exit@).
+--
 -- §11.6 (effect-bundle grammar) is provisionally resolved here as a
 -- decision note rather than syntax: the bundle /is/ a machine
 -- reaction's post-commit action list — the 'Effect' list this
@@ -182,7 +193,11 @@ data RTS = RTS
                                       -- pending slot is what keeps the
                                       -- run-alive check from firing while
                                       -- an import bundle is still queued
-                                      -- (§13.13)
+                                      -- (§13.13). Idle-exempt machines
+                                      -- (machIdle, §11.12 — the default
+                                      -- Error machine) are not counted:
+                                      -- they never terminate, and must
+                                      -- not keep the run alive.
   , rtsExit  :: TVar (Maybe ExitCode)
   , rtsStop  :: TVar Bool             -- ^ graceful effect-runner shutdown
   , rtsBags  :: TVar (Map Name RBag)  -- ^ named bags other than @Global@
@@ -878,7 +893,10 @@ truthy _               = True
 machineThread :: RTS -> RBag -> MachineDef -> IO ()
 machineThread rts bag m = go `finally` decLive
   where
-    decLive = atomically (modifyTVar' (rtsLive rts) (subtract 1))
+    -- Idle-exempt machines (§11.12) are not counted in the live total
+    -- — they park forever by design — so they never decrement it.
+    decLive = unless (machIdle m) $
+      atomically (modifyTVar' (rtsLive rts) (subtract 1))
 
     go
       | null (machJoin m) = do   -- §1: one-shot, unconditionally, at start
@@ -1195,7 +1213,12 @@ installModule rts ms ini = do
                        outSTM b v)
                  es)
           (Map.toList ini)
-    modifyTVar' (rtsLive rts) (+ (length ms - 1))
+    -- Credit only non-idle machines (§11.12): a module's default
+    -- Error machine never terminates, and a leaked live count would
+    -- make the run-alive check never fire (the §13.15 prelude-slot
+    -- shape). The −1 still settles the pending-import slot.
+    modifyTVar' (rtsLive rts)
+                (+ (length (filter (not . machIdle) ms) - 1))
   mbags <- mapM (\m -> (,) m <$> atomically (bagForSTM rts (machBag m))) ms
   as <- mapM (\(m, b) -> async (machineThread rts b m)) mbags
   atomically (modifyTVar' (rtsExtra rts) (++ as))
@@ -1325,7 +1348,9 @@ runLoaded hooks machines initial = do
                        outSTM b v)
                  es)
           (Map.toList initial)
-    writeTVar (rtsLive rts) (length machines)
+    -- Idle-exempt machines (§11.12) are not counted: they never
+    -- terminate, and must not keep the run alive.
+    writeTVar (rtsLive rts) (length (filter (not . machIdle) machines))
   -- Resolve each machine's bag up front: the bag is fixed for the
   -- machine's lifetime (its declaration site named it), and resolving
   -- once keeps the loop from re-reading the bag map on every re-arm.
@@ -1339,11 +1364,30 @@ runLoaded hooks machines initial = do
     live <- readTVar (rtsLive rts)
     ex   <- readTVar (rtsExit rts)
     check (live <= (0 :: Int) || isJust ex)
-  -- Shutdown: machines first (no new bundles after this) — both the
-  -- startup threads and any the @import@ effect spawned mid-run
-  -- (§13.13) — then ask the runner to stop; it finishes the current
-  -- bundle and drains the queue, so every queued bundle is fully
-  -- executed before runProgram returns.
+  -- Shutdown (§11.12): machines first (no new bundles after this) —
+  -- both the startup threads and any the @import@ effect spawned
+  -- mid-run (§13.13) — then ask the runner to stop; it finishes the
+  -- current bundle and drains the queue, so every queued bundle is
+  -- fully executed before runProgram returns.
+  --
+  -- The run-alive check above counts only non-idle machines (§11.12):
+  -- the default Error machine never terminates and must not keep the
+  -- run alive. But cancellation must not race its final grab: if an
+  -- error tuple is sitting in an idle machine's bag, we wait here
+  -- until the bag drains (the parked machine's grab is already woken
+  -- — it removes the tuple and queues its panic bundle; the runner
+  -- sets @rtsExit@ when it drains that bundle, which passes the
+  -- check). Only once every idle bag is empty is cancellation honest:
+  -- there is nothing left for an idle machine to process.
+  let idleBags = map machBag (filter machIdle machines)
+  atomically $ do
+    live <- readTVar (rtsLive rts)
+    ex   <- readTVar (rtsExit rts)
+    idleEmpty <- and <$> mapM (\n -> do
+                                 b <- bagForSTM rts n
+                                 null <$> readTVar (bagTVar b))
+                              idleBags
+    check (live <= (0 :: Int) && idleEmpty || isJust ex)
   mapM_ cancel mths
   extras <- readTVarIO (rtsExtra rts)
   mapM_ cancel extras

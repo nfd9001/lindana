@@ -279,7 +279,7 @@ Roughly in order of how foundational they are:
 9. **`die` vs. `quit`** — used interchangeably in discussion; exact keyword not finalized.
 10. **Top-level program grammar**: now that named bags exist, how do multiple `Name { ... }` blocks, `Global`'s implicit initial-tuple literal, and any other bag's initial state compose into one program's file-level syntax? Flagged early, never revisited. **Provisionally resolved** (§13.6, branch `runtime/named-bags-loader`): a `{ … }` initial block belongs to its nearest enclosing bag — top level is `Global`'s; at most one per bag; nothing else nests (a bag block may not contain another bag block, §6 — sharding is internal, §6.3).
 11. **Bytestring reclamation** — explicitly punted for now (§9); revisit if it matters later.
-12. **Default-Error-machine shutdown hazard**: a program that declares no `Error` block (so the §6.4 default `(c!) : panic c` machine is installed), has no `exit` path, and whose machines all terminate via `die` can never shut down cleanly — the default machine is an immortal parked thread, `rtsLive` never reaches 0, and the RTS aborts with `BlockedIndefinitelyOnSTM`, which Main.hs reports as the §1 deadlock message (exit 1) for what should be a clean exit 0. Repro and candidate fixes in `agent-history/messageboard/sleep-experiment/README.txt` (finding 5), discovered during the §13.21 sleep experiment. Open.
+12. **Default-Error-machine shutdown hazard**: a program that declares no `Error` block (so the §6.4 default `(c!) : panic c` machine is installed), has no `exit` path, and whose machines all terminate via `die` can never shut down cleanly — the default machine is an immortal parked thread, `rtsLive` never reaches 0, and the RTS aborts with `BlockedIndefinitelyOnSTM`, which Main.hs reports as the §1 deadlock message (exit 1) for what should be a clean exit 0. Repro and candidate fixes in `agent-history/messageboard/sleep-experiment/README.txt` (finding 5), discovered during the §13.21 sleep experiment. — **provisionally resolved** (§13.22, branch `runtime/idle-shutdown`): idle-exempt machines (`machIdle`) are not counted in the live total, and the shutdown check drains idle bags before cancelling so the guaranteed panic survives. Flip-worthy if any future machine class needs "parks forever but still gates shutdown".
 
 ---
 
@@ -1190,3 +1190,55 @@ synchronize strategy, and to flip #8 of
   sleepsort as its acceptance test; the finding-2 sentence for
   REFERENCE.md rides along with whichever slice next touches rest
   capture or the reference.
+
+### 13.22 Done — idle-exempt default Error machine (§11.12), branch `runtime/idle-shutdown`
+
+Closes the shutdown hazard opened by §13.21/§11.12: a program with no
+`Error` block, no `exit`, and all machines ending in `die` reported
+the §1 deadlock message (exit 1) instead of ending cleanly — the
+default §6.4 Error machine parked forever, `rtsLive` never reached 0,
+and the RTS aborted with `BlockedIndefinitelyOnSTM`.
+
+- **`machIdle` on `MachineDef`** (Lindana.Def): idle-exempt machines
+  do not keep the run alive. Only the loader's synthetic default
+  Error machine sets it (top level and via `lowerModule` for
+  modules); every user machine and the §13.15 prelude-import one-shot
+  are non-idle.
+- **Live accounting** (Lindana.Machine): `runLoaded` initializes
+  `rtsLive` to the non-idle count; `machineThread`'s `finally`
+  decrements only for non-idle machines; `installModule` credits
+  `+(k′ − 1)` where `k′` counts non-idle module machines (the −1
+  still settles the §13.13 pending-import slot — the §13.15
+  leaked-slot shape would resurface otherwise).
+- **The drain guard**: exempting the default machine alone would let
+  shutdown cancel it while an error tuple sits unclaimed — silently
+  dropping the §6.4 guaranteed panic (the dying machine's `decLive`
+  and the parked default's grab are disjoint STM transactions; a
+  pure live-count fix is genuinely racy). The run-alive check now
+  also reads the idle machines' bags and waits until they are empty
+  before proceeding: the parked machine's grab is already woken by
+  the tuple write, the grab empties the bag, the panic bundle sets
+  `rtsExit`, and the check passes on either arm. Deterministic both
+  ways: clean exit when nothing is pending, guaranteed panic when an
+  error tuple arrived.
+- **Tests**: MachineSpec gains a loader-driven "shutdown (§11.12)"
+  block — the all-die/no-Error-block shape now ends `ExitSuccess`
+  (it timed out before the fix), and the one-shot `error` shape still
+  panics with `ExitFailure 1` (hook fired, exit preserved). A panic
+  message renders its payload structurally (codepoint cons-list), so
+  the test asserts on the hook firing, not a payload substring — the
+  §13.12/§13.18 render story, learned the hard way. ModuleSpec gains
+  the module path via the new `test/modules/quiet.lind` fixture
+  (one-shot `die`, no Error block: its imported default machine must
+  not keep the run alive — this timed out before the fix).
+- Full test suite green (211 cases, randomized order), zero `-Wall`
+  warnings. CLI verified: the C1 repro (`{ (Tick,) } … [say "hi"; die]`)
+  exits 0; `sleepsort-not.lind` now exits 0 (its false-deadlock arm
+  is gone — it still prints one number, which is the §11.7
+  sleep-serialization story, untouched here); `examples/throttle.lind`
+  still reports its genuine deadlock, exit 1.
+- **Next**: the §11.7 runner-scope flip remains the big open thread
+  (sleepsort acceptance test per §13.21); the REFERENCE.md
+  rest-capture sentence from §13.21's finding 2 still rides along
+  with a future reference touch; `Main.hs`'s deadlock message could
+  now mention the all-die shutdown shape if a docs pass wants it.

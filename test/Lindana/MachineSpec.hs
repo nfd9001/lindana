@@ -26,6 +26,8 @@ import Control.Monad (unless)
 import Test.Hspec
 
 import Lindana.Machine
+import Lindana.Loader (loadProgram, loadedInitial, loadedMachines)
+import Lindana.Parser (parseProgram)
 import Lindana.Runtime (Val (..), stringVal)
 import Lindana.Syntax
 
@@ -56,7 +58,7 @@ str :: String -> Expr
 str = consL . map (int . toInteger . ord)
 
 machine :: [PatElem] -> [Action] -> MachineDef
-machine = MachineDef globalBag ""
+machine j b = MachineDef globalBag "" False j b
 
 -- | Run with hooks, all initial tuples in @Global@ (the pre-§6
 -- shape the older tests were written against).
@@ -112,6 +114,45 @@ tmpPath = do
 
 spec :: Spec
 spec = do
+  describe "shutdown: the idle-exempt default Error machine (§11.12)" $ do
+    -- Parse + load + run with say/panic capture, 10s timeout (a hang
+    -- is a failure). The loader appends the §6.4 default Error
+    -- machine when the program declares no Error bag — exactly the
+    -- shape §11.12 is about.
+    let runLoadedSrc src = do
+          p <- case parseProgram (T.pack src) of
+            Left e   -> expectationFailure ("parse failed: " ++ show e) >> error "unreachable"
+            Right p' -> pure p'
+          l <- case loadProgram p of
+            Left err -> expectationFailure ("load failed: " ++ err) >> error "unreachable"
+            Right l' -> pure l'
+          (hooks, said, panics) <- captureHooks
+          mrr <- timeout (10 * 1000000)
+                   (runLoaded hooks (loadedMachines l) (loadedInitial l))
+          rr <- case mrr of
+            Nothing -> expectationFailure "run timed out (deadlock?)" >> error "unreachable"
+            Just rr -> pure rr
+          said' <- said
+          panics' <- reverse <$> readIORef panics
+          pure (said', panics', rr)
+
+    it "a program whose machines all die ends cleanly without an Error block" $ do
+      (said, panics, rr) <- runLoadedSrc $ unlines
+        [ "{ (Tick,) }"
+        , "(Tick,) : [say \"hi\"; die]"
+        ]
+      said `shouldBe` ["hi"]
+      panics `shouldBe` []
+      rrExit rr `shouldBe` ExitSuccess
+
+    it "an error tuple at shutdown still gets its guaranteed panic" $ do
+      -- The panic message renders the tuple structurally (%a-style:
+      -- the payload is a codepoint cons-list), so assert on the hook
+      -- firing, not on a substring.
+      (_, panics, rr) <- runLoadedSrc ": [error (\"boom\", 7)]"
+      length panics `shouldBe` 1
+      rrExit rr `shouldBe` ExitFailure 1
+
   describe "the machine loop (§1)" $ do
     it "capture + splice round-trip through the full loop (§11.1)" $ do
       -- (Ping, 1, 2) → machine (Ping, rest!) : out (Pong, rest!) →
@@ -280,10 +321,10 @@ spec = do
       -- Boomer is gated on (Routed,) so the reroute is certainly
       -- installed before the error fires (both commit in the router's
       -- one transaction).
-      let router = MachineDef "Router" "" (take1 (p1 "Go"))
+      let router = MachineDef "Router" "" False (take1 (p1 "Go"))
             [ Reroute (EAtom "W") (EAtom "Sink")
             , Lob (EAtom "W") (t [EAtom "Routed"]), Die ]
-          boomer = MachineDef "W" "" (take1 (p1 "Routed"))
+          boomer = MachineDef "W" "" False (take1 (p1 "Routed"))
             [ Raise (t [EAtom "Bad", int 7]), Die ]
       r <- runLoaded defaultHooks [router, boomer]
              (Map.fromList [("Router", [t [EAtom "Go"]])])
@@ -298,10 +339,10 @@ spec = do
       -- errors land in Error ++ machSfx before any reroute, so
       -- rerouting that name catches machines from /any/ of the
       -- module's bags. The tag stays Error_v2 (provenance).
-      let router = MachineDef "Router" "" (take1 (p1 "Go"))
+      let router = MachineDef "Router" "" False (take1 (p1 "Go"))
             [ Reroute (EAtom "Error_v2") (EAtom "Sink")
             , Lob (EAtom "W_v2") (t [EAtom "Routed"]), Die ]
-          boomer = MachineDef "W_v2" "_v2" (take1 (p1 "Routed"))
+          boomer = MachineDef "W_v2" "_v2" False (take1 (p1 "Routed"))
             [ Raise (t [EAtom "Bad", int 7]), Die ]
       r <- runLoaded defaultHooks [router, boomer]
              (Map.fromList [("Router", [t [EAtom "Go"]])])
@@ -314,10 +355,10 @@ spec = do
       -- Error bag, so `reroute Error Log` is "all bags in the (top-
       -- level) module": boomer lives in bag W, not Error, and is
       -- still caught.
-      let router = MachineDef "Router" "" (take1 (p1 "Go"))
+      let router = MachineDef "Router" "" False (take1 (p1 "Go"))
             [ Reroute (EAtom "Error") (EAtom "Log")
             , Lob (EAtom "W") (t [EAtom "Routed"]), Die ]
-          boomer = MachineDef "W" "" (take1 (p1 "Routed"))
+          boomer = MachineDef "W" "" False (take1 (p1 "Routed"))
             [ Raise (t [EAtom "Bad", int 7]), Die ]
       r <- runLoaded defaultHooks [router, boomer]
              (Map.fromList [("Router", [t [EAtom "Go"]])])
@@ -331,11 +372,11 @@ spec = do
       -- from different machines would race instead (STM commit
       -- order), which is the same "last committer wins" chaos as any
       -- racing match (§3.1) — documented, not guarded.
-      let router = MachineDef "Router" "" (take1 (p1 "Go"))
+      let router = MachineDef "Router" "" False (take1 (p1 "Go"))
             [ Reroute (EAtom "W") (EAtom "Sink1")
             , Reroute (EAtom "W") (EAtom "Sink2")
             , Lob (EAtom "W") (t [EAtom "Routed"]), Die ]
-          boomer = MachineDef "W" "" (take1 (p1 "Routed"))
+          boomer = MachineDef "W" "" False (take1 (p1 "Routed"))
             [ Raise (t [EAtom "Bad", int 7]), Die ]
       r <- runLoaded defaultHooks [router, boomer]
              (Map.fromList [("Router", [t [EAtom "Go"]])])
@@ -351,7 +392,7 @@ spec = do
       -- bag consumed is exactly the isolation being tested, and the
       -- §1 loop would otherwise keep the run alive (correctly).
       let globalM = machine (take1 (p1 "Work")) [Out (t [EAtom "GlobalFired"]), Die]
-          wM      = MachineDef "W" "" (take1 (p1 "Work"))
+          wM      = MachineDef "W" "" False (take1 (p1 "Work"))
                       [Out (t [EAtom "WFired"]), Exit (int 0)]
       r <- runLoaded defaultHooks [globalM, wM]
              (Map.fromList [("W", [t [EAtom "Work"]]),
@@ -363,8 +404,8 @@ spec = do
 
     it "out emits into the machine's own bag (continuations stay home)" $ do
       -- Two workers in bag W hand off via bare out; Global never sees it.
-      let w1 = MachineDef "W" "" (take1 (p1 "Ping")) [Out (t [EAtom "Pong"]), Die]
-          w2 = MachineDef "W" "" (take1 (p1 "Pong")) [Out (t [EAtom "Done"]), Die]
+      let w1 = MachineDef "W" "" False (take1 (p1 "Ping")) [Out (t [EAtom "Pong"]), Die]
+          w2 = MachineDef "W" "" False (take1 (p1 "Pong")) [Out (t [EAtom "Done"]), Die]
       r <- runLoaded defaultHooks [w1, w2] (Map.singleton "W" [t [EAtom "Ping"]])
       rrBag r `shouldBe` []
       Map.lookup "W" (rrBags r) `shouldBe` Just [VTuple [VAtom "Done"]]
@@ -374,7 +415,7 @@ spec = do
       -- handoff must not lose it. out+lob in one body commit atomically.
       let feeder = machine (take1 (p1 "Go"))
             [ Out (t [EAtom "Fed"]), Lob (EAtom "W") (t [EAtom "Work", int 3]), Die ]
-          worker = MachineDef "W" "" (take1 (PTuple [a "Work", v "n"]))
+          worker = MachineDef "W" "" False (take1 (PTuple [a "Work", v "n"]))
             [ Out (t [EAtom "Got", EVar "n"]), Die ]
       r <- runLoaded defaultHooks [feeder, worker]
              (Map.singleton globalBag [t [EAtom "Go"]])
@@ -882,7 +923,7 @@ spec = do
                  , SayFd (EAtom "B") (EAtom "F")
                  , Lob (EAtom "B") (t [EAtom "Routed"]), Die ]
           mA = machine [] [ Say "from-a" [], Die ]
-          mB = MachineDef "B" "" (take1 (PTuple [a "Routed"]))
+          mB = MachineDef "B" "" False (take1 (PTuple [a "Routed"]))
                  [ Say "from-b" [], FClose (EAtom "F"), Exit (int 0) ]
       r <- runGlobal hooks [router, mA, mB] []
       rrExit r `shouldBe` ExitSuccess
@@ -904,7 +945,7 @@ spec = do
                  , Lob (EAtom "Log_v2") (t [EAtom "Routed"]), Die ]
           -- machSfx "_v2": its module-wide key is Error_v2 (§13.14's
           -- convention, §13.18's table).
-          m2 = MachineDef "Log_v2" "_v2" (take1 (PTuple [a "Routed"]))
+          m2 = MachineDef "Log_v2" "_v2" False (take1 (PTuple [a "Routed"]))
                  [ Say "m2" [], FClose (EAtom "F"), Exit (int 0) ]
           plain = machine (take1 (PTuple [a "Go"])) [ Say "p" [], Die ]
       r <- runGlobal hooks [router, m2, plain] [t [EAtom "Go"]]
@@ -923,7 +964,7 @@ spec = do
                  , SayFd (EAtom "B") (EAtom "F1")
                  , SayFd (EAtom "B") (EAtom "F2")
                  , Lob (EAtom "B") (t [EAtom "Routed"]), Die ]
-          b = MachineDef "B" "" (take1 (PTuple [a "Routed"]))
+          b = MachineDef "B" "" False (take1 (PTuple [a "Routed"]))
                  [ Say "twice-routed" [], FClose (EAtom "F1")
                  , FClose (EAtom "F2"), Exit (int 0) ]
       r <- runGlobal hooks [router, b] []

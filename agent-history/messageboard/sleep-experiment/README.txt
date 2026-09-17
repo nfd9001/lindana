@@ -130,11 +130,11 @@ and the two module files are "supposed to" deadlock. But the shape
 "do some work, die out naturally" is the most natural beginner
 program there is, and it reports a scary exit-1 deadlock by default.
 
-Candidate fixes (not implemented; this note is the record):
-  * the loader marks the default Error machine exempt from `rtsLive`
-    (or spawns it lazily on the first error tuple — there's a §6.2
-    precedent for lazy machine installation);
-  * or the deadlock check ignores machines whose join is the default
-    Error catch-all.
-Filed as §11.12. Whoever picks it up: the sleepsort file doubles as
-the reproduction.
+Candidate fixes were: exempt the default machine from `rtsLive`, or
+spawn it lazily, or ignore it in the deadlock check. **Implemented**
+(branch `runtime/idle-shutdown`, handover §13.22): the loader marks
+the default machine idle-exempt (`machIdle`), the live count and the
+import credit skip it, and the run-alive check waits for idle bags to
+drain before cancelling — so a final error tuple still gets its
+guaranteed panic (regression-tested both ways, plus the module path
+via the `quiet.lind` fixture). Filed as §11.12; resolved there.

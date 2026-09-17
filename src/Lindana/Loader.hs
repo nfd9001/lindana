@@ -135,6 +135,7 @@ preludeImportMachine :: MachineDef
 preludeImportMachine = MachineDef
   { machBag  = globalBag
   , machSfx  = ""
+  , machIdle = False
   , machJoin = []
   , machBody = [Import (EAtom preludeName) (EAtom "Nil") (EAtom "Nil")]
   }
@@ -144,11 +145,19 @@ preludeImportMachine = MachineDef
 -- @Error ++ suffix@ for an imported module, §13.13). The rest
 -- capture (§11.1) matches any tuple — which is all the Error bag
 -- ever accumulates — and binds the whole thing to @c@ for @panic@.
+--
+-- The machine is IDLE-EXEMPT (§11.12): it never terminates, so it
+-- must not keep the run alive — a program whose user machines all
+-- die ends cleanly even though this machine is still parked. The
+-- shutdown check in "Lindana.Machine" (runLoaded) waits for idle
+-- bags to drain before cancelling, so a final error tuple still gets
+-- its guaranteed panic.
 defaultErrorMachine :: Name -> MachineDef
 defaultErrorMachine bag = MachineDef
   { machBag  = bag
   , machSfx  = ""      -- the default machine speaks for the module itself;
                        -- the error routing that matters is its BAG name
+  , machIdle = True
   , machJoin = [PatElem Take (PTuple [PRest "c"])]
   , machBody = [Panic (EVar "c")]
   }
@@ -158,7 +167,7 @@ defaultErrorMachine bag = MachineDef
 -- for loaded modules).
 machine :: Name -> Decl -> MachineDef
 machine bag (Machine lhs body) =
-  MachineDef bag "" lhs body
+  MachineDef bag "" False lhs body
 machine _ d = error ("loader invariant: non-machine reached machine(): " ++ show d)
 
 -- | Walk the top-level declarations. Pragmas (§13.15) are collected

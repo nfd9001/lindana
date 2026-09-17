@@ -304,6 +304,19 @@ spec = describe "module import (§13.13, issue #17)" $ do
     panics `shouldBe` []
     rrExit rr `shouldBe` ExitSuccess
 
+  -- §11.12: quiet's only machine is a one-shot that dies, and it
+  -- declares no Error block — so the import installs the module's
+  -- default Error machine, which is idle-exempt and must not keep
+  -- the run alive once every user machine is gone. Before the fix
+  -- this shape false-deadlocked (10s timeout = failure).
+  it "a module's default Error machine is idle-exempt (§11.12)" $ do
+    (said, panics, rr) <- runMain $ unlines
+      [ ": [bytesBind Mod \"quiet\"; bytesBind Sfx \"_v2\"; import Mod Sfx []; die]"
+      ]
+    said `shouldBe` []
+    panics `shouldBe` []
+    rrExit rr `shouldBe` ExitSuccess
+
 -- | A unique scratch file (created empty) for the §13.17 fd test,
 -- left in the OS temp dir — empty and harmless.
 tmpFdPath :: IO FilePath
