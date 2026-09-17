@@ -274,11 +274,12 @@ Roughly in order of how foundational they are:
 4. **Char type vs. plain Ints** for string sugar — **provisionally resolved** (§13.9, branch `parser/string-sugar`): plain `Int`s all the way down — `"..."` is pure literal sugar (parse-time desugar to the §11.5 cons-list shape) and interpretation is up to whichever action consumes the value. Flip-worthy. **Reinforced** (§13.10, branch `parser/char-sugar`, issue #12): character sugar lands on the same side — `'x'` is the codepoint as a plain `Int`, no `Char` lexical class or runtime type.
 5. **Exact list literal/pattern sugar syntax for cons-lists (§9)** — **provisionally resolved** (§13.7, branch `parser/list-cons-sugar`): `[a, b, c]` / `[h | t]` / `[]`, parse-time desugaring to nested 2-tuples with the `Nil` sentinel atom; no AST nodes; renderer emits the desugared form; `Nil` deliberately not reserved. Flip-worthy.
 6. **Concrete effect-bundle syntax** for the reframed effect-runner model (§7) — the old bracket sketch was for the superseded STM-flavored idea and doesn't apply. **Provisionally resolved** (§13.9, branch `parser/string-sugar`): none needed — the bundle /is/ a machine reaction's post-commit action list, a runtime concept (`Effect`/`Bundle` in "Lindana.Machine"), not a user construct; the user already writes the action list. Decision note recorded in the module header. Flip-worthy.
-7. **Effect-runner scope**: one global runner, or multiple (e.g. per-bag)? (§7.3)
+7. **Effect-runner scope**: one global runner, or multiple (e.g. per-bag)? (§7.3) — **sharpened** (§13.21, `agent-history/messageboard/sleep-experiment/`): the global runner makes `sleep` unable to delay a machine's own re-arm (it throttles the runner thread, not the machine), which kills sleepsort and any self-throttling-by-sleep design; sleepsort is the acceptance test for any flip here. Interacts with the PR #29 comment on per-machine/per-bag fd modelling and "what should race and what should synchronize" (flip #8 of `provisional-std-fd-semantics.txt`). **Design position recorded** (sleep-experiment README): the intended working model is that action-list sequencing enforces ordering — the §5 implicit continuation as real semantics, a machine's later steps waiting on its earlier effects (the runner emits continuation gates at effect boundaries, generalizing the completion-gate idiom); whether ordering is bag-local or machine-local is the same §11.7 flip.
 8. **Bytestring lifecycle vs. effect-runner**: do `create`/`destroy` route through the shared effect-runner, or use independent synchronization? (§7.3) — **provisionally resolved** (§13.8, branch `runtime/bytestring-side-table`): both route through the shared effect-runner as ordinary bundle effects (`EffBytesBind`/`EffBytesDestroy`); the side-table is a plain `TVar`, so bind/destroy are single STM writes from the runner, and a bind emits its `(Bytes, H)` completion tuple into `Global`. Flip-worthy if the global-runner serialization (§11.7) ever matters.
 9. **`die` vs. `quit`** — used interchangeably in discussion; exact keyword not finalized.
 10. **Top-level program grammar**: now that named bags exist, how do multiple `Name { ... }` blocks, `Global`'s implicit initial-tuple literal, and any other bag's initial state compose into one program's file-level syntax? Flagged early, never revisited. **Provisionally resolved** (§13.6, branch `runtime/named-bags-loader`): a `{ … }` initial block belongs to its nearest enclosing bag — top level is `Global`'s; at most one per bag; nothing else nests (a bag block may not contain another bag block, §6 — sharding is internal, §6.3).
 11. **Bytestring reclamation** — explicitly punted for now (§9); revisit if it matters later.
+12. **Default-Error-machine shutdown hazard**: a program that declares no `Error` block (so the §6.4 default `(c!) : panic c` machine is installed), has no `exit` path, and whose machines all terminate via `die` can never shut down cleanly — the default machine is an immortal parked thread, `rtsLive` never reaches 0, and the RTS aborts with `BlockedIndefinitelyOnSTM`, which Main.hs reports as the §1 deadlock message (exit 1) for what should be a clean exit 0. Repro and candidate fixes in `agent-history/messageboard/sleep-experiment/README.txt` (finding 5), discovered during the §13.21 sleep experiment. Open.
 
 ---
 
@@ -1119,3 +1120,74 @@ Takes issue #33: a reference that tracks the *actual* state of the language/runt
 - **Maintenance posture** (the issue's "continually track"): the doc header states the contract — it tracks actual current behavior; where it and the handover disagree about *current* behavior, the doc is the one checked against code. It is expected to be updated in the same PR as any slice that changes user-visible behavior (same rule as the handover/README updates, per AGENTS.md). Flip-worthy alternatives and open questions stay out by design; §11/§13 remain the record of those.
 - No code changes; docs-only slice. Full test suite green (208 cases), zero `-Wall` warnings, no new examples (nothing to verify via CLI beyond re-reading the doc against the sources; the doc contains no syntax not already exercised by the examples).
 - **Next**: nothing opened. The reference is the source for the human's handwritten intro doc (the issue's stated purpose). If a slice lands whose behavior the reference describes, update the reference in that slice's PR.
+
+### 13.21 Side experiment — `sleep` semantics, a tagged-error defer protocol, and the shutdown hazard it exposed (`agent-history/messageboard/sleep-experiment/`)
+
+A sidebar during the post-audit discussion of `examples/bags.lind`'s
+error-handler message: a tagged error handler `(Error, Demo, (s, n))`
+racing a catchall `(Error, rest!)`, where the catchall puts
+Demo-tagged tuples back and naps so the specialist can win the
+re-grab. Experiment record + three runnable artifacts live in
+`agent-history/messageboard/sleep-experiment/` (`README.txt` is the
+writeup; nothing here is committed language behavior). Directly
+relevant to the PR #29 comment on fd modelling and race-vs-
+synchronize strategy, and to flip #8 of
+`provisional-std-fd-semantics.txt`. Four findings:
+
+- **`sleep` cannot delay a machine** (finding 1): it compiles to an
+  `EffSleep` executed by the single global effect runner
+  (`threadDelay` in `runBundle`); the machine re-arms the instant its
+  transaction commits. "Push back and sleep" is a busy livelock
+  (`defer-livelock.lind`); sleepsort degenerates to queue order
+  (`sleepsort-not.lind`). **Sleepsort is the acceptance test for any
+  §11.7 flip**: if a per-machine/per-bag runner design can't make
+  that file print `1 1 3 4 5`, it didn't fix `sleep`. The working
+  primitive for a real delay is the gate-tuple idiom: the runner
+  emits `(Bytes, H)` after its own post-`sleep` work, so blocking on
+  that gate genuinely waits.
+- **Rest capture is lossy on unspliced re-emit** (finding 2): `r!`
+  always binds a tuple (a one-element capture is a 1-tuple), so
+  re-emitting `r` plain nests the payload one 1-tuple layer per
+  round-trip — the defer loop silently mutated the tuple until the
+  specialist's pattern could never match again (it looked like a
+  scheduling race; found by instrumenting the runtime and watching
+  the parens compound in bag dumps). Capture-then-splice is identity;
+  capture-then-plain-emit wraps. Candidate REFERENCE.md sentence
+  wherever §11.1 rest capture is documented.
+- **The working defer protocol** (finding 3, `tagged-error-defer.lind`):
+  the head-of-rest check happens one delegation deep (a `HeadCheck`
+  one-shot binds the head via a nested pattern, guards with
+  `typeOf(h) == Atom` — `==` on lists is a type error — then compares
+  the atom in-block); the nap is a token discipline — the catchall
+  consumes an `(CatchallArmed,)` token per grab and is re-armed by a
+  `(Bytes, Nap)` completion relay — because sleep can't do it.
+  Deterministic across runs.
+- **Hot machines own the bag** (finding 4): a parked machine never
+  won a contested re-grab against an already-running loop (hundreds
+  of rounds, zero wins, across declaration orders). Fine for this
+  protocol (deferring again is progress), but nothing should be
+  designed to need a parked machine to win a re-grab until §3.1 has
+  a priority story.
+
+- **Shutdown hazard found on the way** (finding 5): programs with no
+  `Error` block, no `exit`, and all machines ending in `die`
+  false-deadlock (exit 1) — the default §6.4 Error machine is an
+  immortal parked thread keeping `rtsLive` above zero until the RTS
+  aborts. Repro: the minimal all-die shape `{ (Tick,) } … [say "hi";
+  die]` — `sleepsort-not.lind` sported it too in its first version
+  (a control with an explicit `Error { }` exits cleanly); candidate
+  fixes and the full autopsy in the README. Filed as §11.12.
+
+- No code changes; experiment + docs only. All three artifacts
+  verified by CLI (parse + run, behaviors as documented in their
+  headers); full test suite green (208 cases) before and after —
+  the temporary runtime instrumentation used to diagnose finding 2
+  was reverted (working tree: `git checkout src/Lindana/Machine.hs`)
+  and the suite re-run.
+- **Next**: the §11.12 shutdown hazard is the most actionable thread
+  (small runtime slice: exempt or lazily-spawn the default Error
+  machine, plus a regression test of the `{ (Tick,) } … [die]` shape);
+  the §11.7 flip (per-machine/per-bag runners) is the big one, with
+  sleepsort as its acceptance test; the finding-2 sentence for
+  REFERENCE.md rides along with whichever slice next touches rest
+  capture or the reference.

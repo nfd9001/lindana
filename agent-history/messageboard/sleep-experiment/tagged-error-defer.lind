@@ -1,0 +1,74 @@
+-- TAGGED ERROR HANDLER + CATCHALL WITH A WORKING DEFER PROTOCOL
+-- (see README.txt in this directory; findings 2 and 3).
+--
+-- The Error bag has a specialist (Error, Demo, (s, n)) and a catchall
+-- (Error, rest!). The catchall can't pattern-exclude Demo (§3.1
+-- race), so on every grab it takes the (CatchallArmed,) token with it
+-- and hands rest to a HeadCheck one-shot, which binds the HEAD of
+-- rest as a value via a nested pattern and checks it in-block:
+-- typeOf(h) == Atom guards == on atoms (== on casual strings/lists is
+-- a type error), then h == Demo. On Demo: splice the tuple back
+-- (r! — capture-then-splice round-trips; capture-then-plain-emit
+-- wraps, finding 2) and nap — the catchall stays disarmed until the
+-- (Bytes, Nap) completion relay re-arms it, because sleep cannot
+-- delay a machine's own re-arm (finding 1). The specialist is gated
+-- on (SpecialistGo,), which lands ~25ms after the tagged error, so
+-- the catchall is guaranteed first contact; during the nap window
+-- only the specialist can match the waiting tuple.
+--
+-- Expected output (deterministic):
+--   job paid: 30
+--   (catchall deferred a Demo error, napping)
+--   specialist: late 30
+--   catchall: ((108, (97, (116, (101, Nil)))), (99))
+--   [exit 0]
+
+{
+  (Job, 3)
+}
+
+(Job, n) :
+  [lob Workers (Compute, n, (Done,)); lob Log ("dispatched", n); die]
+
+Workers {
+  {
+    (Salary, 10)
+  }
+  (Compute, n, c), rd(Salary, rate) : [(c!, n * rate); die]
+  (Done, x) :
+    [say "job paid: %i" x; error (Demo, ("late", x)); sleep 25; bytesBind GoGate [1]; die]
+}
+
+Log { }
+
+(Bytes, Nap) : [lob Error (CatchallArmed,)]
+(Bytes, GoGate) : [lob Error (SpecialistGo,); die]
+
+Error {
+  {
+    (CatchallArmed,)
+  }
+
+  -- specialist: exact shape, gated until after first contact
+  (Error, Demo, (s, n)), rd(SpecialistGo,) :
+    [say "specialist: %s %i" s n; (Fin,); die]
+
+  -- catchall: takes the arm-token with it on every grab
+  (Error, rest!), (CatchallArmed,) : [(HeadCheck, rest)]
+
+  -- the check: head bound via a nested pattern, compared in-block
+  (HeadCheck, (h, r!)) :
+    [ if typeOf(h) == Atom then
+        [ if h == Demo then
+            [say "(catchall deferred a Demo error, napping)";
+             lob Error (Error, Demo, r!);
+             sleep 5;
+             bytesBind Nap [1]]
+          else
+            [say "catchall: %a" (h, r); exit 0] ]
+      else
+        [say "catchall: %a" (h, r); exit 0] ]
+
+  -- specialist's continuation: feed the catchall an untagged error
+  (Fin,) : [error ("late", 99); die]
+}
