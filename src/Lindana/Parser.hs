@@ -77,7 +77,7 @@ reservedWords = Set.fromList
   , "lob", "error", "panic"
   , "rand", "typeOf", "atomize", "atos"
   , "bytesBind", "bytesDestroy", "bytesEqual", "bytesRead", "bytesCompare"
-  , "import", "reroute"
+  , "import", "reroute", "sayfd"
   , "fopen", "fclose", "fread", "fwrite"
   ]
 
@@ -443,6 +443,7 @@ actionP = choice
   [ ifP
   , lobP
   , rerouteP
+  , sayfdP
   , bytesBindP
   , bytesDestroyP
   , importP
@@ -488,6 +489,15 @@ lobP = rword "lob" *> (Lob <$> bagTarget <*> tupleExpr)
 -- stands for "all bags in the module" (§13.14).
 rerouteP :: Parser Action
 rerouteP = rword "reroute" *> (Reroute <$> bagTarget <*> bagTarget)
+
+-- | Issue #18 (§13.18): @sayfd Bag Fd@ — the say-FD reroute sister
+-- effect (§13.14's design, §13.18's table). Both arguments are bag
+-- names (atoms, or variables holding names as data — the §13.13
+-- extension): machines declared in @Bag@ say through the fd @Fd@.
+-- A module's mangled Error bag as @Bag@ means "all bags in the
+-- module", exactly as with @reroute@.
+sayfdP :: Parser Action
+sayfdP = rword "sayfd" *> (SayFd <$> bagTarget <*> bagTarget)
 
 sayP :: Parser Action
 sayP = do

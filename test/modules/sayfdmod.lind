@@ -1,0 +1,9 @@
+-- sayfdmod: the §13.18 module test fixture. The module reroutes its
+-- own say stream: its written `sayfd` names ITS bag (the mangled
+-- Boot) and takes the fd as DATA — a caller-opened fd passed in a
+-- tuple (the §13.17 fdwriter pattern, with sayfd standing in for
+-- fwrite). A module cannot name the real top-level Stdout or open a
+-- caller-chosen path under its own handle; fd-as-data is the route.
+Boot {
+  (Go, fd, reply) : [sayfd Boot fd; say "module says here"; lob reply (Done,)]
+}

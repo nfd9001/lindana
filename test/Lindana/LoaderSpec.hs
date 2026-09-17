@@ -7,12 +7,13 @@
 -- the runtime behavior matters.
 module Lindana.LoaderSpec (spec) where
 
-import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Text as T
+import System.Directory (getTemporaryDirectory)
 import System.Exit (ExitCode (..))
+import System.IO (hClose, openBinaryTempFile, stderr, stdin)
 import System.Timeout (timeout)
 
 import Data.List (sort)
@@ -170,12 +171,14 @@ spec = do
 
     it "makes error fatal end-to-end: error verb → default machine → panic" $ do
       l <- loadOk "{ (Boom,) }\n(Boom,) : [error (\"bad\", 7); die]"
-      r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
+      h <- silentHooks
+      r <- runLoaded h (loadedMachines l) (loadedInitial l)
       rrExit r `shouldBe` ExitFailure 1
 
     it "an empty Error { } block swallows errors silently end-to-end" $ do
       l <- loadOk "{ (Boom,) }\nError { }\n(Boom,) : [error (\"bad\", 7); die]"
-      r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
+      h <- silentHooks
+      r <- runLoaded h (loadedMachines l) (loadedInitial l)
       rrExit r `shouldBe` ExitSuccess
       Map.lookup "Error" (rrBags r) `shouldBe`
         Just [VTuple [VAtom "Error", stringVal "bad", VInt 7]]
@@ -188,7 +191,8 @@ spec = do
         , "}"
         , "(Boom,) : [error (\"recoverable\", 1); die]"
         ]
-      r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
+      h <- silentHooks
+      r <- runLoaded h (loadedMachines l) (loadedInitial l)
       rrExit r `shouldBe` ExitSuccess
 
   describe "no-LHS machines (§1 one-shot, issue #7)" $
@@ -232,7 +236,8 @@ spec = do
         , "([h | t],) : (t,)"
         , "([],) : exit 0"
         ]
-      r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
+      h <- silentHooks
+      r <- runLoaded h (loadedMachines l) (loadedInitial l)
       rrExit r `shouldBe` ExitSuccess
 
   describe "casual-string e2e (§9)" $ do
@@ -267,7 +272,8 @@ spec = do
         , "  ; if A == B then (SameAtom,) else (DifferentAtoms,)"
         , "  ; exit 0 ]"
         ]
-      r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
+      h <- silentHooks
+      r <- runLoaded h (loadedMachines l) (loadedInitial l)
       sort (map renderVal (rrBag r)) `shouldBe`
         ["(ContentNeq)", "(DifferentAtoms)"]
       rrExit r `shouldBe` ExitSuccess
@@ -370,7 +376,9 @@ spec = do
         , "(D,) : exit 0"
         ]
       (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
-      said `shouldBe` ["nl\n"]
+      -- §13.18: capture reads the Stdout fd's byte stream — the %b
+      -- content's own newline and say's trailing newline split as two.
+      said `shouldBe` ["nl", ""]
       rrExit rr `shouldBe` ExitSuccess
       Map.member "Version" (rrBytes rr) `shouldBe` False
       Map.lookup "Newline" (rrBytes rr) `shouldBe` Just (encodeUtf8 (T.pack "\n"))
@@ -385,7 +393,8 @@ spec = do
         [ ": import Prelude Nil []"
         , "(Imported, Prelude, Nil), (Imported, Prelude, Nil) : exit 0"
         ]
-      r <- runLoaded silentHooks (loadedMachines l) (loadedInitial l)
+      h <- silentHooks
+      r <- runLoaded h (loadedMachines l) (loadedInitial l)
       rrExit r `shouldBe` ExitSuccess
 
     it "a repeat import settles its pending slot (e2e regression)" $ do
@@ -401,7 +410,7 @@ spec = do
         , "(Imported, Prelude, Nil), (Imported, Prelude, Nil) : [(Done,); die]"
         ]
       mr <- timeout (10 * 1000000)
-              (runLoaded silentHooks (loadedMachines l) (loadedInitial l))
+              (silentHooks >>= \h -> runLoaded h (loadedMachines l) (loadedInitial l))
       case mr of
         Nothing -> expectationFailure "run hung: repeat import leaked its pending slot"
         Just r  -> rrExit r `shouldBe` ExitSuccess
@@ -414,19 +423,35 @@ spec = do
 -- @BlockedIndefinitelyOnSTM@ deadlock report — which is not reliable
 -- under the test harness (flaky hangs). End e2e programs with an
 -- explicit @exit@, not just @die@.
+--
+-- §13.18: @say@ is un-magicked — capture is the @Stdout@ fd's OS
+-- handle (a scratch temp file), read back after the run.
 runCaptureSay :: [MachineDef] -> Map Name [Expr]
               -> IO ([String], RunResult)
 runCaptureSay ms initial = do
-  saidRef <- newIORef []
-  let hooks = Hooks { hookSay = \s -> modifyIORef' saidRef (s :)
+  d <- getTemporaryDirectory
+  (p, hout) <- openBinaryTempFile d "lindana-say-test"
+  let hooks = Hooks { hookStdin  = stdin
+                    , hookStdout = hout
+                    , hookStderr = stderr
                     , hookPanic = \_ -> pure ()
                     , hookModDir = "." }
   rr <- runLoaded hooks ms initial
-  said <- reverse <$> readIORef saidRef
+  hClose hout
+  said <- lines <$> readFile p
   pure (said, rr)
 
--- Hooks that keep end-to-end runs quiet (panic would otherwise hit
--- real stderr).
-silentHooks :: Hooks
-silentHooks = Hooks
-  { hookSay = \_ -> pure (), hookPanic = \_ -> pure (), hookModDir = "." }
+-- | Hooks that keep end-to-end runs quiet: @say@ (the Stdout fd) and
+-- @panic@ both land in scratch files instead of the test runner's
+-- output. IO: the scratch handles need opening.
+silentHooks :: IO Hooks
+silentHooks = do
+  d <- getTemporaryDirectory
+  (_, hout) <- openBinaryTempFile d "lindana-say-test"
+  (_, herr) <- openBinaryTempFile d "lindana-say-test"
+  pure Hooks
+    { hookStdin  = stdin
+    , hookStdout = hout
+    , hookStderr = herr
+    , hookPanic  = \_ -> pure ()
+    , hookModDir = "." }

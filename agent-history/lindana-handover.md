@@ -996,3 +996,108 @@ fds + `say` repurposed + the say-FD reroute sister effect are part 2;
   fresh-name generation, unified error routing (FD failures are now
   the second strongest data point after import failure),
   parser-error-message plumbing.
+
+### 13.18 Done — std fds + un-magicked `say` + `sayfd` (§7.2, §9, §12), branch `runtime/std-fds` (issue #18, part 2)
+
+Takes issue #18's part 2 (the shared "Next" of PRs #25/#27): the
+`Stdin`/`Stdout`/`Stderr` preregistration, `say` no longer magic —
+it writes through the fd table like any `fwrite` — and the say-FD
+reroute sister effect, §13.14's table design applied to `say`'s
+output. One new table (`rtsSayFd`), one new action (`sayfd`), the
+`Hooks` shape changed (the `say` callback is gone); no new modules.
+
+- **Std fds preregistered**: `Stdin` (read mode, LINE mode),
+  `Stdout`, `Stderr` (write mode) land in `rtsFds` at RTS start —
+  ordinary fd-table entries, issue #18's words: nothing std is
+  special. Last `fopen` on the name wins (closing the std OS handle
+  first), `fclose Stdout` makes every later `say`/`fwrite Stdout` an
+  honest runner-safe fatal, `bytesBind` can clobber a read line.
+  Tested: say fatals after fclose Stdout; freads fatal after fclose
+  Stdin.
+- **`say` un-magicked**: `EffSay` now carries the fd it writes
+  through, resolved IN-TRANSACTION by `sayTargetSTM` (the §13.14
+  reroute semantics — a `sayfd` earlier in the same action list is
+  honored, the routed fd travels with the deferred bundle, and a
+  concurrent sayfd from another machine is §3.1 commit chaos). At
+  effect time the formatted line (`formatSay` unchanged, plus its
+  newline) is `BS.hPut` + `hFlush` through the fd table — the
+  `fwrite` path. Unknown fd / wrong mode: runner-safe fatal (§13.17
+  precedent). `fwrite Stdout S` is now the natural endgame the
+  §13.17 messageboard pointed at; say and fwrite share one byte
+  stream, in bundle order (tested).
+- **Blocking reads available (the carried §13.17 open question,
+  resolved toward blocking)**: `fread Stdin` BLOCKS FOR A LINE —
+  `BS.hGetLine` on the line-mode fd (`FdState`'s new `fdLine`).
+  EOF reads as the honest empty remainder (the spent-fd shape:
+  clobber `""` + emit the `(Fread, Stdin)` gate); the fd is never
+  spent by a line read and stays EOF after. Tested: three gated
+  reads over `"alpha\nbeta"` (no trailing newline — the partial
+  last line is delivered) deliver alpha, beta, "". The cost: a
+  blocked read parks the GLOBAL effect runner (§11.7) — every other
+  queued effect waits behind it; recorded on the messageboard as
+  unifying with §11.7's open runner-scope question, not a new
+  hazard class.
+- **`sayfd Bag Fd`** — the say-FD reroute sister effect (issue #18's
+  words), §13.14's design with a different table
+  (`rtsSayFd :: TVar (Map Name Name)`): bag-specific key (the
+  machine's own bag), then module-wide key = the module's mangled
+  Error bag (`Error ++ sfx` — the only per-module name a module's
+  source can spell; at top level this key IS plain `Error`, so
+  `sayfd Error F` catches every top-level machine's says), then
+  default `Stdout`. In-transaction install, last update wins
+  (strictly ordered within one machine's action list — tested).
+  Targets are NOT checked against the fd table (the reroute
+  precedent): the §6.2 accumulator story — the say effect fatals
+  honestly at run time if the fd never appears (tested). Reserved;
+  renders and round-trips; both arguments mangle in modules (a
+  module can only sayfd its OWN bags; it reaches real fds as data —
+  e2e-tested with the `sayfdmod.lind` fixture, the fdwriter
+  fd-as-data pattern with sayfd standing in for fwrite).
+- **Hooks changed**: `hookSay` is GONE — with say un-magicked there
+  is no say callback; tests inject the std HANDLES
+  (`hookStdin`/`hookStdout`/`hookStderr`) the std fds are
+  preregistered with (capture = a scratch temp file read back after
+  the run). `hookPanic` stays a callback (panic is fatal, never
+  routed, §13.14). The std fds are preregistered binary
+  (`hSetBinaryMode` on the hooked handles): say/fwrite write UTF-8
+  bytes regardless of locale. Test-visible consequence, recorded on
+  the messageboard: a capture now sees the fd's BYTE stream, where
+  a say's trailing newline is the only separator — two pre-existing
+  expectations (a %s with an embedded newline, the prelude's "nl"
+  test) updated for exactly this reason; `fwrite` stays byte-exact.
+- **Messageboard**: `provisional-std-fd-semantics.txt` — eleven
+  flip-worthy calls (the `sayfd` spelling, the mangled-Error-bag
+  module-wide key, unrouted-fd targets not checked, in-transaction
+  fd resolution, say's trailing newline, blocking-line reads vs
+  read-available, same-handle dual-table clobber, the §11.7 runner
+  parking cost, std fds being uncloseable-by-default-less (they
+  ARE closeable), hooks-as-Handles, binary preregistration).
+- **Tests**: 15 new — Spec: sayfd grammar (two bag-name args,
+  variables legal, reserved word, round-trip, both args mangle).
+  MachineSpec: say/fwrite share Stdout in bundle order, fwrite
+  Stderr through its fd, the blocked-line Stdin reads + EOF, sayfd
+  bag-specific tier (gate lobbed into the routed bag), sayfd
+  module-wide tier via `Error_v2` (machSfx-carrying MachineDef),
+  last-update-wins, the unroutable-fd fatal, fclose Stdout/Stdin
+  honesty. ModuleSpec e2e: a module reroutes its own say stream to
+  a caller-passed fd. 208 total green, randomized order, 3× repeat
+  stable, zero `-Wall` warnings.
+- **Examples**: `examples/stdio.lind` (+ `stdio-input.txt`,
+  `stdio-out.tmp` gitignored) — writes through `Stdout`, blocks on
+  a piped `fread Stdin` line, `sayfd`-reroutes `Global`'s stream
+  into a file and back (last update wins); verified via CLI
+  (`stack exec lindana -- examples/stdio.lind <
+  examples/stdio-input.txt`, exit 0, deterministic output) and
+  `--parse` round-trip (fixed point; the rendered desugared form
+  also runs). All pre-existing examples re-verified (the three
+  non-standalone demos still exit 1 when run directly).
+- **Remaining threads (issue #18 part 3 + carried)**: `bytesNew`
+  fresh-name generation (§11.11 adjacency; the issue's inline
+  auto-promotion sugar is the stretch goal); append mode `A`
+  (messageboard flip #1 of §13.17); unified error routing (§3.3/
+  §7.3 — FD failures and now say-through-dead-fd are the strongest
+  data points). Still open in §11: mixed int/double arithmetic
+  (§11.3), effect-runner scope (§11.7 — sharpened by the blocked-
+  read parking cost), `die` vs `quit` (§11.9), bytestring
+  reclamation (§11.11), fresh-name generation, parser-error-message
+  plumbing (sayfd joins the reserved-word pile).

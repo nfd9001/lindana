@@ -22,7 +22,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import System.Directory (getTemporaryDirectory)
 import System.Exit (ExitCode (..))
-import System.IO (hClose, openBinaryTempFile)
+import System.IO (hClose, openBinaryTempFile, stderr, stdin)
 import System.Timeout (timeout)
 
 import Test.Hspec
@@ -35,17 +35,22 @@ import Lindana.Runtime (Val (..))
 -- | Parse + load a main program (inline source) and run it with the
 -- module search pointed at @test/modules@, capturing @say@ and
 -- @panic@ output. Times out at 10s (a hang is a failure).
+-- §13.18: @say@ is un-magicked — capture is the @Stdout@ fd's OS
+-- handle (a scratch temp file), read back after the run.
 runMain :: String -> IO ([String], [String], RunResult)
 runMain src = do
-  saidRef  <- newIORef []
   panicRef <- newIORef []
+  d <- getTemporaryDirectory
+  (sayFile, hout) <- openBinaryTempFile d "lindana-say-test"
   p <- case parseProgram (T.pack src) of
     Left e   -> expectationFailure ("parse failed: " ++ show e) >> error "unreachable"
     Right p' -> pure p'
   l <- case loadProgram p of
     Left err -> expectationFailure ("load failed: " ++ err) >> error "unreachable"
     Right l' -> pure l'
-  let hooks = Hooks { hookSay = \s -> modifyIORef' saidRef (s :)
+  let hooks = Hooks { hookStdin  = stdin
+                    , hookStdout = hout
+                    , hookStderr = stderr
                     , hookPanic = \s -> modifyIORef' panicRef (s :)
                     , hookModDir = "test/modules" }
   mrr <- timeout (10 * 1000000)
@@ -53,7 +58,8 @@ runMain src = do
   rr <- case mrr of
     Nothing -> expectationFailure "run timed out (deadlock?)" >> error "unreachable"
     Just rr -> pure rr
-  said   <- reverse <$> readIORef saidRef
+  hClose hout
+  said   <- lines <$> readFile sayFile
   panics <- reverse <$> readIORef panicRef
   pure (said, panics, rr)
 
@@ -273,6 +279,28 @@ spec = describe "module import (§13.13, issue #17)" $ do
       , "        (Read,) : [say \"%b\" G; exit 0] }"
       ]
     said `shouldBe` ["hello from the top level"]
+    panics `shouldBe` []
+    rrExit rr `shouldBe` ExitSuccess
+
+  it "a module reroutes its own says with sayfd (fd as data, §13.18)" $ do
+    -- The module's written `sayfd Boot out` is `sayfd Boot_v2 out`
+    -- after mangling — its OWN bag, and the fd arrives as data (the
+    -- fdwriter pattern). Its say lands in the caller's file, while
+    -- the top level's own say (Stdout, captured) is untouched.
+    path <- tmpFdPath
+    (said, panics, rr) <- runMain $ unlines $
+      preamble "sayfdmod" "_v2" ++
+      [ importLine
+      , ": fopen F \"" ++ path ++ "\" W"
+      , "(Fopen, F), (Imported, Mod, \"_v2\") :"
+      , "  lob Boot_v2 (Go_v2, F, Reply)"
+      , "Reply { (Done_v2,) : [fclose F; fopen G \"" ++ path ++ "\" R; fread G; (Read,)]"
+      , "        (Read,) : [say \"%b\" G; exit 0] }"
+      ]
+    -- The file holds say's full line ("module says here\n"); the %b
+    -- read-back re-says it, so the capture sees the line plus the
+    -- read-back line.
+    said `shouldBe` ["module says here", ""]
     panics `shouldBe` []
     rrExit rr `shouldBe` ExitSuccess
 

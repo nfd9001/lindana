@@ -18,8 +18,10 @@ import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import System.Directory (getTemporaryDirectory)
 import System.Exit (ExitCode (..))
-import System.IO (hClose, openBinaryTempFile)
+import System.IO (hClose, openBinaryFile, openBinaryTempFile, stderr, stdin,
+                  IOMode (ReadMode))
 import System.Timeout (timeout)
+import Control.Monad (unless)
 
 import Test.Hspec
 
@@ -69,16 +71,30 @@ p1 n = PTuple [a n]
 take1 :: Pat -> [PatElem]
 take1 p = [PatElem Take p]
 
--- | Capture @say@ output and @panic@ messages.
-captureHooks :: IO (Hooks, IORef [String], IORef [String])
+-- | Capture @say@ output (§13.18: say is un-magicked — its stream
+-- goes through the Stdout fd, so capture is a /Handle/ (a scratch
+-- temp file), read back after the run) and @panic@ messages. @said@
+-- is an IO action: it closes the capture handle (first call only) and
+-- returns the lines said.
+captureHooks :: IO (Hooks, IO [String], IORef [String])
 captureHooks = do
-  said   <- newIORef []
   panics <- newIORef []
+  d <- getTemporaryDirectory
+  (p, hout) <- openBinaryTempFile d "lindana-say-test"
   let hooks = Hooks
-        { hookSay   = \s -> modifyIORef' said (s :)
-        , hookPanic = \m -> modifyIORef' panics (m :)
+        { hookStdin  = stdin
+        , hookStdout = hout
+        , hookStderr = stderr
+        , hookPanic  = \m -> modifyIORef' panics (m :)
         , hookModDir = "."
         }
+  closedRef <- newIORef False
+  let said = do
+        c <- readIORef closedRef
+        unless c $ do
+          writeIORef closedRef True
+          hClose hout
+        lines <$> readFile p
   pure (hooks, said, panics)
 
 -- | §13.17: a unique scratch file path (created empty), for fopen
@@ -170,16 +186,16 @@ spec = do
       let m = machine (take1 (p1 "Go"))
             [ Say "first" [], Sleep (int 5), Say "second" [], Die ]
       _ <- runGlobal hooks [m] [t [EAtom "Go"]]
-      output <- readIORef said
-      reverse output `shouldBe` ["first", "second"]
+      output <- said
+      output `shouldBe` ["first", "second"]
 
     it "die drops the rest of the bundle" $ do
       (hooks, said, _) <- captureHooks
       let m = machine (take1 (p1 "Go"))
             [ Say "before" [], Die, Say "after" [] ]
       _ <- runGlobal hooks [m] [t [EAtom "Go"]]
-      output <- readIORef said
-      reverse output `shouldBe` ["before"]
+      output <- said
+      output `shouldBe` ["before"]
 
     it "tuple-space writes commit before deferred effects (§8.2 note)" $ do
       (hooks, said, _) <- captureHooks
@@ -187,8 +203,8 @@ spec = do
             [ Out (t [EAtom "Marked"]), Sleep (int 50), Say "late" [], Die ]
       r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrBag r `shouldSatisfy` elem (VTuple [VAtom "Marked"])
-      output <- readIORef said
-      reverse output `shouldBe` ["late"]
+      output <- said
+      output `shouldBe` ["late"]
 
     it "say formats %i and %s" $ do
       (hooks, said, _) <- captureHooks
@@ -196,8 +212,8 @@ spec = do
             [ Say "n is %i, s is %s" [EVar "n", EVar "s"], Die ]
       _ <- runGlobal hooks [m]
              [t [EAtom "Go", int 42, consL [int 104, int 105]]]
-      output <- readIORef said
-      reverse output `shouldBe` ["n is 42, s is hi"]
+      output <- said
+      output `shouldBe` ["n is 42, s is hi"]
 
     it "say %s decodes a casual string, escapes and non-ASCII included (§9)" $ do
       (hooks, said, _) <- captureHooks
@@ -205,8 +221,11 @@ spec = do
             [ Say "<%s>" [EVar "s"], Die ]
       _ <- runGlobal hooks [m]
              [t [EAtom "Go", consL [int 72, int 105, int 10, int 9786]]]
-      output <- readIORef said
-      reverse output `shouldBe` ["<Hi\n\9786>"]
+      -- §13.18: the capture reads the Stdout fd's byte stream — a
+      -- say's own trailing newline is the only separator, so the %s
+      -- content's embedded newline splits like any line break would.
+      output <- said
+      output `shouldBe` ["<Hi", "\9786>"]
 
   describe "termination verbs" $ do
     it "exit terminates the program with the given code" $ do
@@ -443,7 +462,7 @@ spec = do
       -- kills the transaction: the Out never commits, the tuple stays
       -- in the bag, no effects leak.
       rrBag r `shouldBe` [VTuple [VAtom "Go"]]
-      output <- readIORef said
+      output <- said
       output `shouldBe` []
 
   describe "lob accumulation (§6.2 preview)" $ do
@@ -462,8 +481,8 @@ spec = do
             [ Out (t [EAtom "Marked"]), Sleep (int 40), Say "after-slept" [], Die ]
       r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple [VAtom "Marked"]]
-      output <- readIORef said
-      reverse output `shouldBe` ["after-slept"]
+      output <- said
+      output `shouldBe` ["after-slept"]
 
   describe "ordering comparisons (issue #24)" $ do
     it "orders ints and doubles; comparisons drive branches" $ do
@@ -483,7 +502,7 @@ spec = do
                  [Out (t [EAtom "Less"])] [Out (t [EAtom "More"])] ]
       r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple [VAtom "Go"]]
-      output <- readIORef said
+      output <- said
       output `shouldBe` []
 
     it "atoms order nowhere: < on two atoms aborts the machine's transaction" $ do
@@ -496,7 +515,7 @@ spec = do
       -- The interpret-time error kills the transaction: the Out never
       -- commits, the tuple stays in the bag, no effects leak.
       rrBag r `shouldBe` [VTuple [VAtom "Go"]]
-      output <- readIORef said
+      output <- said
       output `shouldBe` []
 
     it "an atom never orders against a number (issue #24)" $ do
@@ -507,7 +526,7 @@ spec = do
                  [Out (t [EAtom "Less"])] [Out (t [EAtom "More"])] ]
       r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple [VAtom "Go"]]
-      output <- readIORef said
+      output <- said
       output `shouldBe` []
 
   describe "bytestring side-table (§9)" $ do
@@ -569,8 +588,8 @@ spec = do
             [ Say "<%b>" [EAtom "G"], Die ]
           b = machine [] [ BytesBind "G" (consL [int 72, int 105]), Die ]
       _ <- runGlobal hooks [m, b] [t [EAtom "Go"]]
-      output <- readIORef said
-      reverse output `shouldBe` ["<Hi>"]
+      output <- said
+      output `shouldBe` ["<Hi>"]
 
     it "bytesEqual on an unbound handle aborts the machine's transaction" $ do
       (hooks, said, _) <- captureHooks
@@ -581,7 +600,7 @@ spec = do
       -- The interpret-time error kills the transaction: the Out never
       -- commits, the tuple stays in the bag, no effects leak.
       rrBag r `shouldBe` [VTuple [VAtom "Go"]]
-      output <- readIORef said
+      output <- said
       output `shouldBe` []
 
     it "bytesCompare orders contents lexicographically (§9, issue #24)" $ do
@@ -613,7 +632,7 @@ spec = do
             , Out (t [ECall "bytesCompare" [EAtom "Nope", EAtom "Nope"]]) ]
       r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple [VAtom "Go"]]
-      output <- readIORef said
+      output <- said
       output `shouldBe` []
 
   describe "bytesRead — the decode-back path (§9, issue #12)" $ do
@@ -644,7 +663,7 @@ spec = do
             [ Out (ECall "bytesRead" [EAtom "Nope"]), Die ]
       r <- runGlobal hooks [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple [VAtom "Go"]]
-      output <- readIORef said
+      output <- said
       output `shouldBe` []
 
     it "== between atom literals is identity even without bytes bound" $ do
@@ -672,7 +691,7 @@ spec = do
                  [ Say "%b" [EAtom "G"], Exit (int 0) ]
       r <- runGlobal hooks [w, b, wr, cl, rd, out] []
       rrExit r `shouldBe` ExitSuccess
-      readIORef said >>= pure . reverse >>= (`shouldBe` ["hello"])
+      said >>= (`shouldBe` ["hello"])
       Map.lookup "G" (rrBytes r) `shouldBe` Just "hello"
     it "content survives the round-trip as UTF-8 bytes" $ do
       (hooks, _, _) <- captureHooks
@@ -704,7 +723,7 @@ spec = do
                  [ Say "[%b]" [EAtom "G"], Exit (int 0) ]
       r <- runGlobal hooks [w, b, wr, cl, rd, out] []
       rrExit r `shouldBe` ExitSuccess
-      readIORef said >>= pure . reverse >>= (`shouldBe` ["[]"])
+      said >>= (`shouldBe` ["[]"])
       Map.lookup "G" (rrBytes r) `shouldBe` Just ""
     it "fopen on a missing file is a runner-safe fatal: exit 1, no silent runner death" $ do
       (hooks, _, panics) <- captureHooks
@@ -775,7 +794,7 @@ spec = do
       r <- runGlobal hooks [w, b, wr, cl, rd, out]
              [t [EAtom "Go", EAtom "F"]]
       rrExit r `shouldBe` ExitSuccess
-      readIORef said >>= pure . reverse >>= (`shouldBe` ["data!"])
+      said >>= (`shouldBe` ["data!"])
     it "a repeated fopen on the same handle wins last (both completions emit)" $ do
       (hooks, _, panics) <- captureHooks
       pathA <- tmpPath
@@ -793,3 +812,147 @@ spec = do
       -- The write landed through pathB's handle: last fopen wins.
       BS.readFile pathB `shouldReturn` "b"
       BS.readFile pathA `shouldReturn` ""
+
+  describe "std fds + un-magicked say (§13.18, issue #18 part 2)" $ do
+    it "the std fds are preregistered: fwrite Stdout is the say path, in order" $ do
+      (hooks, said, _) <- captureHooks
+      let b = machine []
+            [ BytesBind "A" (str "a"), BytesBind "B" (str "b"), Die ]
+          m = machine (take1 (PTuple [a "Bytes", a "A"])
+                        ++ take1 (PTuple [a "Bytes", a "B"]))
+                [ FWrite (EAtom "Stdout") (EAtom "A"), Say "mid" []
+                , FWrite (EAtom "Stdout") (EAtom "B"), Exit (int 0) ]
+      r <- runGlobal hooks [b, m] []
+      rrExit r `shouldBe` ExitSuccess
+      -- say and fwrite share one fd: one byte stream, in bundle
+      -- order. fwrite is byte-exact (no newline of its own); say
+      -- writes a line. The file reads "a" "mid\n" "b\n".
+      said >>= (`shouldBe` ["amid", "b"])
+    it "fwrite Stderr goes through the Stderr fd" $ do
+      d <- getTemporaryDirectory
+      (_, hout) <- openBinaryTempFile d "lindana-say-test"
+      (perr, herr) <- openBinaryTempFile d "lindana-say-test"
+      let hooks = Hooks { hookStdin = stdin, hookStdout = hout
+                        , hookStderr = herr, hookPanic = \_ -> pure ()
+                        , hookModDir = "." }
+          b = machine [] [ BytesBind "E" (str "err!"), Die ]
+          m = machine (take1 (PTuple [a "Bytes", a "E"]))
+                [ FWrite (EAtom "Stderr") (EAtom "E"), Exit (int 0) ]
+      r <- runGlobal hooks [b, m] []
+      rrExit r `shouldBe` ExitSuccess
+      hClose herr
+      BS.readFile perr `shouldReturn` "err!"
+    it "fread Stdin blocks for a line; lines keep coming; EOF reads as the empty remainder" $ do
+      d <- getTemporaryDirectory
+      (_, hout) <- openBinaryTempFile d "lindana-say-test"
+      (pin, hin) <- openBinaryTempFile d "lindana-stdin-test"
+      BS.hPut hin (encodeUtf8 (T.pack "alpha\nbeta"))   -- no trailing newline:
+      hClose hin                                        -- the last line is partial
+      hin' <- openBinaryFile pin ReadMode
+      let hooks = Hooks { hookStdin = hin', hookStdout = hout
+                        , hookStderr = stderr, hookPanic = \_ -> pure ()
+                        , hookModDir = "." }
+          -- Three reads through the line-mode fd, each gated on the
+          -- previous read's (Fread, Stdin) tuple (the gate exists only
+          -- after the read effect ran) plus a counter tuple. The
+          -- whole-remainder semantics would deliver "alpha\nbeta" in
+          -- ONE read — three reads with "alpha", "beta", "" is the
+          -- line story, and the empty third read is EOF (the honest
+          -- empty remainder; the fd is NOT spent — lines keep coming
+          -- until EOF, and it stays EOF after).
+          r1 = machine [] [ FRead (EAtom "Stdin"), Out (t [EAtom "C", int 1]), Die ]
+          r2 = machine (take1 (PTuple [a "C", v "n"])
+                        ++ take1 (PTuple [a "Fread", a "Stdin"]))
+                 [ Out (t [EAtom "R", ECall "bytesRead" [EAtom "Stdin"]])
+                 , If (EBin Eq (EVar "n") (int 3)) [Exit (int 0)]
+                     [ FRead (EAtom "Stdin")
+                     , Out (t [EAtom "C", EBin Add (EVar "n") (int 1)]) ] ]
+      r <- runGlobal hooks [r1, r2] []
+      rrExit r `shouldBe` ExitSuccess
+      -- The three gated reads deliver "alpha", "beta", "" (counter-
+      -- ordered); the bag's listing order is accidental (§3), so sort.
+      sort (map renderVal (rrBag r)) `shouldBe`
+        sort (map (\s -> renderVal (VTuple [VAtom "R", stringVal s]))
+                  ["alpha", "beta", ""])
+    it "sayfd Bag Fd routes a bag's says to the fd (bag-specific tier)" $ do
+      (hooks, said, _) <- captureHooks
+      path <- tmpPath
+      let router = machine []
+                 [ FOpen "F" (str path) (EAtom "W")
+                 , SayFd (EAtom "B") (EAtom "F")
+                 , Lob (EAtom "B") (t [EAtom "Routed"]), Die ]
+          mA = machine [] [ Say "from-a" [], Die ]
+          mB = MachineDef "B" "" (take1 (PTuple [a "Routed"]))
+                 [ Say "from-b" [], FClose (EAtom "F"), Exit (int 0) ]
+      r <- runGlobal hooks [router, mA, mB] []
+      rrExit r `shouldBe` ExitSuccess
+      -- a's say (bag Global) still goes to Stdout; b's say (bag B) is
+      -- rerouted through the fopen'd file. The gate is LOBBED into B
+      -- (mB's own bag, §6.1) and makes the install-vs-say order
+      -- deterministic. F is closed before the test reads the file —
+      -- GHC's per-Handle locking keeps an open handle's file locked.
+      said >>= (`shouldBe` ["from-a"])
+      BS.readFile path `shouldReturn` "from-b\n"
+    it "sayfd module-wide tier: the mangled Error bag catches all of a module's machines" $ do
+      (hooks, said, _) <- captureHooks
+      path <- tmpPath
+      let router = machine []
+                 [ FOpen "F" (str path) (EAtom "W")
+                 , SayFd (EAtom "Error_v2") (EAtom "F")
+                 -- The gate has to cross into m2's OWN bag (§6.1): a
+                 -- machBag "Log_v2" machine matches Log_v2, not Global.
+                 , Lob (EAtom "Log_v2") (t [EAtom "Routed"]), Die ]
+          -- machSfx "_v2": its module-wide key is Error_v2 (§13.14's
+          -- convention, §13.18's table).
+          m2 = MachineDef "Log_v2" "_v2" (take1 (PTuple [a "Routed"]))
+                 [ Say "m2" [], FClose (EAtom "F"), Exit (int 0) ]
+          plain = machine (take1 (PTuple [a "Go"])) [ Say "p" [], Die ]
+      r <- runGlobal hooks [router, m2, plain] [t [EAtom "Go"]]
+      rrExit r `shouldBe` ExitSuccess
+      -- The _v2 machine's says land in the file; the plain machine's
+      -- (sfx "", module-wide key Error) still go to Stdout.
+      said >>= (`shouldBe` ["p"])
+      BS.readFile path `shouldReturn` "m2\n"
+    it "last update wins: the second sayfd in one action list takes" $ do
+      (hooks, _, _) <- captureHooks
+      path1 <- tmpPath
+      path2 <- tmpPath
+      let router = machine []
+                 [ FOpen "F1" (str path1) (EAtom "W")
+                 , FOpen "F2" (str path2) (EAtom "W")
+                 , SayFd (EAtom "B") (EAtom "F1")
+                 , SayFd (EAtom "B") (EAtom "F2")
+                 , Lob (EAtom "B") (t [EAtom "Routed"]), Die ]
+          b = MachineDef "B" "" (take1 (PTuple [a "Routed"]))
+                 [ Say "twice-routed" [], FClose (EAtom "F1")
+                 , FClose (EAtom "F2"), Exit (int 0) ]
+      r <- runGlobal hooks [router, b] []
+      rrExit r `shouldBe` ExitSuccess
+      BS.readFile path1 `shouldReturn` ""
+      BS.readFile path2 `shouldReturn` "twice-routed\n"
+    it "an unroutable fd is the say effect's honest runner-safe fatal" $ do
+      (hooks, _, panics) <- captureHooks
+      let router = machine []
+                 [ SayFd (EAtom "Global") (EAtom "NoSuch")
+                 , Out (t [EAtom "Routed"]), Die ]
+          b = machine (take1 (PTuple [a "Routed"]))
+                 [ Say "boom" [], Exit (int 0) ]
+      r <- runGlobal hooks [router, b] []
+      rrExit r `shouldBe` ExitFailure 1
+      readIORef panics >>= pure . reverse >>=
+        (`shouldSatisfy` any ("say: unknown fd handle NoSuch" `isInfixOf`))
+    it "fclose Stdout makes every later say an honest fatal (std fds are ordinary)" $ do
+      (hooks, _, panics) <- captureHooks
+      let m = machine [] [ FClose (EAtom "Stdout"), Say "boom" [], Die ]
+      r <- runGlobal hooks [m] []
+      rrExit r `shouldBe` ExitFailure 1
+      readIORef panics >>= pure . reverse >>=
+        (`shouldSatisfy` any ("say: unknown fd handle Stdout" `isInfixOf`))
+    it "fclose Stdin is honest too: further freads fatal" $ do
+      (hooks, _, panics) <- captureHooks
+      let m = machine [] [ FClose (EAtom "Stdin"), FRead (EAtom "Stdin"), Die ]
+      r <- runGlobal hooks [m] []
+      rrExit r `shouldBe` ExitFailure 1
+      readIORef panics >>= pure . reverse >>=
+        (`shouldSatisfy` any ("fread: unknown fd handle Stdin" `isInfixOf`))
+
