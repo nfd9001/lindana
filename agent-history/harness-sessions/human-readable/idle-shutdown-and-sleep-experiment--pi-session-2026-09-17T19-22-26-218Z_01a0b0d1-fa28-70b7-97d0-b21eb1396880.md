@@ -737,3 +737,131 @@ Add the session dump step to #37 too.
 
 > 🔧 `read`
 > 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Done. Session dumped per the skill and committed to `runtime/idle-shutdown`:
+
+- **Machine-readable**: `agent-history/harness-sessions/machine-readable/2026-09-17T19-22-26-218Z_01a0b0d1-….jsonl` (353 messages, 172 tool calls, verbatim)
+- **Human-readable**: `agent-history/harness-sessions/human-readable/idle-shutdown-and-sleep-experiment--pi-session-2026-09-17T19-22-26-218Z_….md`
+- Commit: `Session dump: idle-shutdown and sleep experiment` → pushed, so [#37](https://github.com/nfd9001/lindana/pull/37) now carries the full raw record alongside the fix.
+
+
+## 🧑 User
+
+I took a look at #36: sleepsort-not could never produce the suggested output, due to the `die`, correct? A more reasonable option would be: inputs are passed in as a list of length l. A worker task unwinds the list into calls to `N`, and emits a `(Counter l)`. Each instance of `N`, of which we need at least l copies, matches `(N, n) (Counter, r)`. This task `N` immediately emits `(Counter, r-1)` and then does the rest of the work we've already described. Closes with a machine `(Counter, 0) : exit 0`.
+
+> 🔧 `write`
+
+## 🤖 Assistant
+
+You're right — with `die`, one declaration = one grab, so my file never even attempted l numbers; it was a broken yardstick. Your counter-gated design is the proper shape: the worker unwinds + counts, the counter gates the `N` grabs until the whole list is out, and `(Counter, 0) : exit 0` closes deterministically (after the l-th grab no `(N, *)` tuples remain, so the exit machine owns `(Counter, 0)` uncontested). Rewriting:
+
+> 🔧 `bash`
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Exactly as designed: deterministic `5 1 4 1 3`, clean exit 0 — full pipeline exercised, sleeps honored but orderless. Updating the README's finding 1 to match:
+
+> 🔧 `bash`
+> 🔧 `edit`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The v2 file no longer false-deadlocks (it exits via `(Counter, 0)`), so finding 5's "repro is sleepsort-not.lind itself" pointer is stale — fixing it and the same pointer in §13.21:
+
+
+## 🧑 User
+
+(Bug in my plan: when N gets a `Counter, 1)` it should wait to emit `(Counter, 0)` until it has finished the rest of its work.
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Good catch — and it's worth being precise about what the bug bites: under today's runtime the says all happen anyway (queued bundles drain even after `exit` sets the code), so it's behavior-neutral here; but it's exactly wrong for the flip this file is the yardstick for — under a runner where instances really delay, the exit would fire while slower sleepers are still working. And since a plain tuple write commits in-transaction, "emit `(Counter, 0)` after the work" is only expressible today via the completion-gate idiom — which is also the honest way to write it:
+
+
+## 🧑 User
+
+(When I noted my mental model: remember, sequencing actions happens under an implicit continuation that should enforce a (bag- or machine-local ordering of effects, no?)
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Sharp question — and it's testable against the implementation, because the answer determines whether my `bytesBind` workaround was even necessary. Let me read `interpretActions` precisely:
+
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Confirmed from the code — and the answer is: **your mental model is only half-true of the shipped runtime, and the half that fails is exactly the one the sleepsort fix needed.** Here's what `interpretActions` actually guarantees:
+
+**What IS ordered (your intuition holds):**
+- **Effects, machine-locally**: the whole action list folds into one deferred bundle (`go (effSleep t : acc) rest`), and the runner executes each bundle strictly FIFO, one bundle live at a time. So `[sleep 10; say "a"]` really sleeps, then says. ✓
+- **Effects, globally**: single runner → all bundles interleave in one total FIFO order. ✓
+
+**What is NOT ordered:**
+- **Tuple writes vs. effects.** `Out`/`Lob`/`Raise` execute `outSTM`/`lobSTM` *immediately, inside the matching transaction* — regardless of their position in the list. `[sleep 100; (Done,); die]` lands `(Done,)` at match time; the sleep happens later, in somebody else's thread (the runner). The write hoists; it is not "a step after" the sleep.
+
+So the §5 "implicit continuation" story — `[a; b; c]` sugar over Restricted machines re-arming through continuation tuples — is not what ships. §13.3's two-phase interpreter collapsed it: one transaction per match, writes commit atomically with the match, irrevocables defer. And note even the *sugar story* wouldn't have fully given you the ordering you want: the continuation tuple is itself written in step 1's transaction, so step 2 could still match before step 1's effects run. The only ordering the runtime has ever enforced between a write and an effect is: writes beat everything.
+
+That's precisely why "wait to emit `(Counter, 0)` until the work is done" cannot be written as list position — `[sleep; say; (Counter, 0)]` emits at grab time — and why v3 routes the terminal token through `bytesBind`: an *effect* that emits a completion tuple is the only thing in the language whose tuple lands after earlier effects.
+
+This subtlety deserves recording — it's the third instance of the same lesson (finding 1: sleep doesn't delay machines; the gate idiom; and now: writes hoist over sequencing). Let me add it to the README, finish the stale-pointer fixes, and push:
+
+> 🔧 `bash`
+> 🔧 `edit`
+> 🔧 `bash`
+
+## 🧑 User
+
+(Yes, I meant to indicate my _intended_ working model, as motivated by this example/the Github comment I'd flagged earlier, not the current state.)
+
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+Got it — you're stating the design target: the §5 continuation story should actually *hold* — sequencing enforces machine- (or bag-) local ordering of effects — as motivated by sleepsort and the PR #29 comment. That's a substantive position and the experiment note should record it as such, not just my "current behavior" corollary. Let me check what's still stale, then write it up properly:
+
+> 🔧 `edit`
+> 🔧 `edit`
+> 🔧 `edit`
+
+## 🤖 Assistant
+
+Now record the design position in the handover's §11.7 entry and verify everything, then push:
+
+> 🔧 `bash`
+> 🔧 `bash`
+
+## 🤖 Assistant
+
+The commit landed on the wrong branch — I was still on `runtime/idle-shutdown` from PR B, but this redesign belongs to #36 (`docs/driving`). Moving it:
+
+
+## 🤖 Assistant
+
+Sorted out — the redesign now lives on `docs/driving` (updating [#36](https://github.com/nfd9001/lindana/pull/36)), and I force-with-lease'd the stray commit back off `runtime/idle-shutdown`, so [#37](https://github.com/nfd9001/lindana/pull/37) is again exactly fix + session dump.
+
+Where things landed:
+
+**`sleepsort-not.lind` v3** (your design + your fix):
+- Worker unwinds the list into `(N, n)` tuples while counting, hands `l` to the countdown gate.
+- `N` grabs `(N, n), (Counter, r)`, immediately re-arms `(Counter, r-1)`, sleeps, says — **except** the `(Counter, 1)` holder, who emits the terminal token *after* its own work, via a `bytesBind Last` completion gate, and `(Bytes, Last) : exit 0` closes.
+- Verified: parses + round-trips; deterministic `5 1 4 1 3`, exit 0, every run. The yardstick stands: a §11.7 flip that makes it print `1 1 3 4 5` fixed `sleep`.
+
+**Your mental model, recorded as a design position** in the README (and referenced from §11.7): sequencing under the implicit continuation *should* enforce machine- or bag-local ordering of effects — §5's continuation story as real semantics, not sugar. With the implementation sketch the experiment suggests: split action lists at effect boundaries, and have the runner emit each machine's continuation gate when a segment's effects finish — the `(Bytes, H)` completion idiom generalized into exactly the §5 AContN machinery the handover always claimed "falls out of the loop re-arming." Whether that ordering is bag-local or machine-local is the same §11.7 flip, and sleepsort doubles as the test for how much serialization is too much.
+
+One honest note in the file's defense of your bug report: under *today's* runtime the unfixed v2 happens to print everything anyway (queued say bundles drain even after `exit` sets the code), so the bug is latent — but it's real under the intended model, where `exit` while slower instances sleep would kill their output. v3 is correct by construction under both.
+
+
+## 🧑 User
+
+Let's freshen that session dump, if you hadn't.
+
+> 🔧 `bash`
