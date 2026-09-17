@@ -164,6 +164,40 @@ data Action
                                 --   module". Both arguments must evaluate
                                 --   to atoms. Last update wins. See
                                 --   "Lindana.Machine" for the routing.
+  | FOpen Name Expr Expr        -- ^ @fopen H Path Mode@ (issue #18, §13.17) —
+                                --   open the file at @Path@ (an expression
+                                --   evaluating to a casual string, usually a
+                                --   @"..."@ literal — the path is data, never
+                                --   mangled) in mode @M@ (an expression that
+                                --   must evaluate to the atom @R@ or @W@;
+                                --   the mode position is exempt from
+                                --   mangling — it is a runtime-checked
+                                --   keyword, like the hide lists). @H@ is a
+                                --   compile-time-chosen atom handle
+                                --   (mangled), the @bytesBind@ precedent:
+                                --   declaring a handle is the declaration
+                                --   site's job. Registers @H@ in the fd
+                                --   table ('Lindana.Machine' @rtsFds@) and
+                                --   emits @(Fopen, H)@ into @Global@.
+  | FClose Expr                -- ^ @fclose e@ (§13.17) — close the file
+                                --   handle the expression evaluates to (an
+                                --   atom naming an fd-table entry). Unknown
+                                --   handle: a no-op (idempotent close, the
+                                --   @bytesDestroy@ precedent).
+  | FRead Expr                 -- ^ @fread e@ (§13.17) — read the entire
+                                --   remaining content through the read-mode
+                                --   handle the expression evaluates to, and
+                                --   register it in the bytestring side-table
+                                --   under the /same/ handle (clobbering any
+                                --   prior content — @say %b H@ reads it
+                                --   back). Emits @(Fread, H)@ into @Global@.
+  | FWrite Expr Expr           -- ^ @fwrite H S@ (§13.17) — write the
+                                --   bytestring @S@ names (a side-table
+                                --   handle as data) through the write-mode
+                                --   handle @H@ (also an expression — the
+                                --   fd-as-data pattern, so a module can
+                                --   write through a caller-passed fd).
+                                --   Emits @(Fwrote, H)@ into @Global@.
   | If Expr [Action] [Action]   -- ^ Terse @if@; branches are action sequences.
   deriving (Eq, Show)
 
@@ -213,6 +247,11 @@ renderAction Die          = "die"
 renderAction (Sleep e)    = "sleep " ++ renderExpr e
 renderAction (Panic e)    = "panic " ++ renderExpr e
 renderAction (Raise e)    = "error " ++ renderExpr e
+renderAction (FOpen h p m) =
+  "fopen " ++ h ++ " " ++ renderExpr p ++ " " ++ renderExpr m
+renderAction (FClose e)   = "fclose " ++ renderExpr e
+renderAction (FRead e)    = "fread " ++ renderExpr e
+renderAction (FWrite h s) = "fwrite " ++ renderExpr h ++ " " ++ renderExpr s
 renderAction (BytesBind h e) = "bytesBind " ++ h ++ " " ++ renderExpr e
 renderAction (BytesDestroy e) = "bytesDestroy " ++ renderExpr e
 renderAction (Import h s hide) =

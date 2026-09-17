@@ -902,3 +902,97 @@ atom rulings. One new builtin; no new tables or effects.
   routing (the new ordering-abort messages are the same provisional
   Haskell-error family), and the parser-error-message plumbing
   (new data point above).
+
+### 13.17 Done — file descriptors (§9, §7.2, §12), branch `runtime/file-fds` (issue #18, part 1)
+
+Takes the shared "Next" item of PRs #23 and #25: issue #18's core —
+the file-handle table, open/close/read/write effects, data pushed and
+pulled through the §9 bytestring side-table. Part 1 of three: std
+fds + `say` repurposed + the say-FD reroute sister effect are part 2;
+`bytesNew` fresh-handle generation is part 3 (both recorded in
+"Next").
+
+- **New RTS table**: `rtsFds :: TVar (Map Name FdState)` — the
+  bytestring side-table's design: opaque atom handle → open OS
+  handle + mode. To the matcher a handle is just an atom; only the
+  `f*` verbs reach in. Empty at start (the issue's
+  `Stdin`/`Stdout`/`Stderr` preregistration is the next slice —
+  nothing std is in the table yet).
+- **Syntax (provisional, flip-worthy)**: `fopen H Path Mode` — @H@ is
+  a compile-time-chosen atom handle (mangled, the `bytesBind`
+  precedent), @Path@ an expression evaluating to a casual string
+  (data, never mangled), @Mode@ an expression that must evaluate to
+  the atom `R` or `W` (`W` truncates; the mode position is exempt
+  from mangling — a runtime-checked keyword, the hide-list
+  precedent). `fclose e` / `fread e` / `fwrite H S` take the handle
+  as an /expression/: fds travel as data, so a module can write
+  through a caller-passed fd (the §13.13 bag-name-as-data pattern).
+  All four verbs reserved; render and round-trip.
+- **Data via the side-table (the issue's "data via Lindana-bytestrings")**:
+  `fread H` pulls the entire remaining content through a read-mode
+  handle and registers it in `rtsBytes` under the /same/ handle
+  (clobbering — `say %b H` reads it back), emitting `(Fread, H)` into
+  `Global`. `fwrite H S` writes the bytes named by side-table handle
+  @S@ through write-mode handle @H@ (flushed), emitting `(Fwrote, H)`.
+  All completion tuples into `Global` — the `(Bytes, H)` gate idiom.
+- **Spent read fds**: strict `BS.hGetContents` closes the OS handle as
+  it reads, so a successful `fread` SPENDS the read fd (`FdState`'s
+  `fdSpent`); further `fread`s honestly return the empty remainder
+  (clobber `""` + re-emit the gate tuple). `fclose` on a spent handle
+  is a harmless no-op; `fclose` of an unknown handle is a no-op
+  (idempotent, the `bytesDestroy` precedent).
+- **Re-fopen closes the old handle**: last `fopen` on a name wins, and
+  the superseded OS handle is /closed/ first — found by the tests:
+  GHC's per-Handle locking makes a leaked handle keep the file locked
+  (ResourceBusy on reopen); the silent-leak alternative was
+  un-reopenable files. Provisional; "second fopen fails loudly" is
+  the recorded flip.
+- **Runner-safe fatals** (§13.13 import precedent): missing file,
+  wrong-mode read/write, unknown fd/source handles → panic hook +
+  exit 1, never silent runner death. No pending-live-count slots
+  (FDs spawn no machines; the graceful effect-runner drain runs every
+  queued bundle before a run returns — a queued `fwrite` after the
+  last machine dies still lands).
+- **Mangling**: the `fopen` handle mangles; the path string literal
+  and the mode position do not (mode is a runtime-checked keyword —
+  the hide-list precedent); `fclose`/`fread`/`fwrite` argument atoms
+  mangle like any mention. A module can open its own paths but can
+  only operate on ITS handles — caller-passed fds arrive as data.
+- **Deliberately deferred (issue #18's remaining parts)**: std fds +
+  `say` no longer magic + the say-FD reroute sister effect (§13.14's
+  table is the design sketch); fresh-handle generation for a dynamic
+  `bytesNew` (the "anonymous strings during runtime" paragraph, which
+  wants fresh-name generation — still open in §11). Recorded as FUTURE
+  OPTION in `agent-history/messageboard/provisional-file-fd-semantics.txt`
+  alongside eleven flip-worthy calls of this slice (R/W-only, mode
+  exempt from mangling, declaration-vs-data handle split, close-on-
+  refopen, spent-fd semantics, same-handle dual-table, runner-safe
+  fatals vs error routing, CWD-relative paths, no pending slots, std
+  fds deferred, same-file interleave hazard).
+- **Tests**: 22 new — Spec: fd grammar (fopen three-part, expression
+  handles, reserved words, round-trip, mangling incl. the mode
+  exemption); MachineSpec: write/read round-trip incl. UTF-8 bytes,
+  gate tuples, the spent-fd second fread, five runner-safe fatal
+  cases, fclose idempotence, fd-as-data variables, last-fopen-wins;
+  ModuleSpec e2e: a module fwrites through a caller-passed fd
+  (fd-as-data across the import boundary; the module's fwrite
+  mentions only variables). 193 total green, randomized order, 3×
+  repeat stable. Zero `-Wall` warnings (a pre-existing
+  `-Wmissing-fields` in MachineSpec's `captureHooks` — present on
+  main — fixed in passing with `hookModDir = "."`; `directory` and
+  `bytestring` added to the test-suite deps, both boot packages).
+- **Examples**: `examples/files.lind` — fopen W, bytesBind, fwrite,
+  fclose, reopen R, two freads (the second shows the spent-fd empty
+  remainder); verified via CLI (exit 0, deterministic output) and
+  `--parse` round-trip (fixed point; the rendered desugared form
+  also runs). All pre-existing examples re-verified (the three
+  deadlock-demonstration programs still exit 1).
+- **Remaining threads (issue #18 parts 2–3 + carried)**: std fds
+  (`Stdin`/`Stdout`/`Stderr` preregistered at start), `say` as
+  `lob`-over-fds + its reroute sister effect; `bytesNew` fresh-name
+  generation (§11.11 adjacency). Still open in §11: mixed
+  int/double arithmetic (§11.3), effect-runner scope (§11.7),
+  `die` vs `quit` (§11.9), bytestring reclamation (§11.11),
+  fresh-name generation, unified error routing (FD failures are now
+  the second strongest data point after import failure),
+  parser-error-message plumbing.

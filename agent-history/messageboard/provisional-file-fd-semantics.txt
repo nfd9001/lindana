@@ -1,0 +1,76 @@
+PROVISIONAL: file-fd semantics (§13.17, issue #18 part 1)
+Branch: runtime/file-fds
+
+Flip-worthy calls made in the file-descriptor slice, each with its
+alternative and flip instructions. Like every provisional decision:
+recorded, not litigated — flip with a test update and a handover note.
+
+1. R/W only; no append. `W` truncates. The obvious third mode is `A`
+   (append, for logs) — flip: add `FdAppend`, an `IOMode` mapping, and
+   an accepted mode atom in `interpretActions`'s FOpen case; grammar
+   unchanged (mode is a runtime-checked expression).
+
+2. Mode is an EXPRESSION evaluated to the atom `R`/`W`, and the mode
+   position is exempt from suffix mangling (the hide-list precedent).
+   Alternative: two verbs (`fopenR`/`fopenW`) — no exemption needed.
+   Flip: split the verb, drop the mangle exemption in
+   `Lindana.Import.mangleAction`.
+
+3. `fopen`'s handle is a compile-time-chosen atom (the `bytesBind`
+   precedent — declaring a handle is the declaration site's job), while
+   `fread`/`fwrite`/`fclose` take the handle as an EXPRESSION (fds
+   travel as data, so a module can write through a caller-passed fd —
+   the §13.13 bag-name-as-data pattern). Alternative: all four take
+   expressions. Flip: change `FOpen`'s first field to `Expr` + an
+   action-layer atom check; mangling follows automatically.
+
+4. Re-fopen on a live name CLOSES the superseded OS handle first
+   (last-wins without the leak). Found by the tests: GHC's per-Handle
+   locking makes a leaked handle keep the file locked (ResourceBusy on
+   reopen) — the leak alternative was un-reopenable files. Flip: make
+   a second fopen on a live name fail loudly instead (a runner-safe
+   fatal); the close-old branch in `runBundle`'s EffFopen goes away.
+
+5. `fread` reads the ENTIRE remaining content (strict `BS.hGetContents`)
+   and SPENDS the fd — strict hGetContents closes the OS handle as it
+   reads, so a spent read fd's remaining content is honestly ""
+   (tracked by `FdState`'s `fdSpent`; further freads clobber the
+   side-table entry with the empty bytestring and re-emit the gate
+   tuple). Alternatives: chunked reads (needs a size arg — flip: add
+   `freadN H N`); line reads (a separate verb); a non-closing read
+   (hGet + hFileSize seek — more state, no user benefit yet).
+
+6. fread/fwrite content lives in the bytestring SIDE-TABLE under the
+   same handle as the fd (`fread H` clobbers `rtsBytes[H]`). One name,
+   two tables; `bytesBind H …` can clobber the content of a live fd's
+   table entry harmlessly. Alternative: a separate file-content table.
+   Flip: new table + `EffFread` writes there instead; `%b` unchanged.
+
+7. Fallible FD effects (missing file, wrong mode, unknown handles) are
+   RUNNER-SAFE FATALS: panic hook + exit 1 (the §13.13 import
+   precedent), NOT errors routed to the Error bag. The unified error
+   routing question (§3.3/§7.3) may revisit this — FD failures are a
+   natural candidate for the `error` verb once routing unifies.
+
+8. Paths are plain `FilePath`s, CWD-relative (the Haskell process's
+   CWD, NOT `hookModDir` — modules get no magic). A module can open
+   its own paths (the fopen HANDLE mangles, the path is data). Flip:
+   resolve relative paths against hookModDir for module opens — but
+   that would need the module's identity carried into the effect.
+
+9. No pending-live-count slots for FD effects (unlike §13.13 imports):
+   FDs spawn no machines, and the graceful effect-runner drain runs
+   every queued bundle before a run returns — a queued fwrite after
+   the last machine dies still lands. Flip would only matter if fd
+   effects ever spawn machines.
+
+10. Stdin/Stdout/Stderr preregistration and the say-FD reroute sister
+    effect are NOT in this slice (issue #18 part 2): `say` is still
+    hook-based, no std fds in the table yet. `fwrite Stdout S` is the
+    intended endgame; the reroute table (§13.14) is the design sketch
+    for the say-FD sister effect.
+
+11. Append-adjacent hazard, documented not guarded: two write handles
+    on the same file (via two fopens) interleave at the OS level —
+    buffered writes flush on hFlush/fclose, ordering across handles is
+    the user's problem (§3.1 chaos, no guard).

@@ -78,6 +78,7 @@ reservedWords = Set.fromList
   , "rand", "typeOf", "atomize", "atos"
   , "bytesBind", "bytesDestroy", "bytesEqual", "bytesRead", "bytesCompare"
   , "import", "reroute"
+  , "fopen", "fclose", "fread", "fwrite"
   ]
 
 -- | Whitespace consumer. At depth 0: spaces, tabs, CRs and @--@ line
@@ -445,6 +446,7 @@ actionP = choice
   , bytesBindP
   , bytesDestroyP
   , importP
+  , fileP
   , sayP
   , exitP
   , sleepP
@@ -533,6 +535,28 @@ bytesDestroyP = rword "bytesDestroy" *> (BytesDestroy <$> exprP)
 
 importP :: Parser Action
 importP = rword "import" *> (Import <$> exprP <*> exprP <*> exprP)
+
+-- | Issue #18 (§13.17): the file-descriptor verbs. @fopen H Path Mode@
+-- declares a handle — a capitalized atom, compile-time-chosen and
+-- mangled, the @bytesBind@ precedent — with the path (data, usually a
+-- @"..."@ literal) and the mode (an expression that must evaluate to
+-- the atom @R@ or @W@). @fclose@/@fread@/@fwrite@ take the handle as an
+-- /expression/: handles travel as data, so a module can operate on a
+-- caller-passed fd (the §13.13 bag-name-as-data pattern).
+fopenP :: Parser Action
+fopenP = rword "fopen" *> (FOpen <$> atomIdent <*> exprP <*> exprP)
+
+fcloseP :: Parser Action
+fcloseP = rword "fclose" *> (FClose <$> exprP)
+
+freadP :: Parser Action
+freadP = rword "fread" *> (FRead <$> exprP)
+
+fwriteP :: Parser Action
+fwriteP = rword "fwrite" *> (FWrite <$> exprP <*> exprP)
+
+fileP :: Parser Action
+fileP = choice [fopenP, fcloseP, freadP, fwriteP]
 
 --------------------------------------------------------------------------------
 -- Declarations & program
