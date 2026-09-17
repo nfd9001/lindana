@@ -1,0 +1,34 @@
+-- SLEEPSORT (the non-working kind) — the acceptance-test yardstick
+-- for any §11.7 effect-runner flip (see README.txt, finding 1).
+--
+-- Classic sleepsort: one machine per number sleeps proportional to
+-- the number, then prints; the sleeps order the output. Three things
+-- stop that here, in increasing subtlety:
+--
+--   1. Threads are spawned per DECLARED machine, not per tuple: the
+--      single (N, n) machine processes ONE tuple (outSTM prepends, so
+--      the first match is the LAST-loaded initial tuple) and dies.
+--      A re-arming (no-die) variant processes all five — in grab
+--      order, still not sorted order.
+--   2. `sleep` delays the single global effect runner, not the
+--      machine: every [sleep n*10; say n] bundle drains FIFO, one
+--      fully live at a time, so the sleep contributes nothing to
+--      ordering. Bundle queue order = grab order = output order.
+--   3. After the machine dies, the run false-deadlocks (exit 1,
+--      the §1 deadlock message) — NOT because of sleep: the default
+--      §6.4 Error machine (installed because this file declares no
+--      Error block) is an immortal parked thread, and the RTS's
+--      blocked-thread check fires. Finding 5 in README.txt; a
+--      control with an explicit `Error { }` appended exits cleanly.
+--
+-- Observed: prints `5`, then the deadlock message, exit 1 —
+-- deterministically. If a runner flip makes THIS file print
+-- `1 1 3 4 5`, sleep has become actually useful.
+--
+--   timeout 30 stack exec lindana -- sleepsort-not.lind
+
+{
+  (N, 3), (N, 1), (N, 4), (N, 1), (N, 5)
+}
+
+(N, n) : [sleep n * 10; say "%i" n; die]

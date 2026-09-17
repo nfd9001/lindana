@@ -25,5 +25,5 @@ Workers {
 Log { }
 
 Error {
-  (Error, rest!) : [say "error handler: %a" rest; die]
+  (Error, rest!) : [say "Error handling demonstration: handler caught: %a" rest; die]
 }

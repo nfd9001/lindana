@@ -1,0 +1,33 @@
+-- DEFER LIVELOCK: the naive version of the defer protocol, kept as a
+-- repro for findings 1 and 4 (see README.txt).
+--
+-- A hot pushback ping-pong: A takes the Demo-tagged tuple and hands
+-- rest to B; B pushes it back — unspliced, so the payload also gains
+-- a 1-tuple wrap per hop (finding 2). Neither machine ever sleeps
+-- meaningfully: `sleep` throttles the global effect runner, not the
+-- machine's re-arm (finding 1), so both machines spin at full speed.
+-- The gated specialist never wins a re-grab (finding 4: parked
+-- machines lose every contested re-grab to already-running ones).
+--
+-- Run with a timeout: this is a deliberate busy livelock (100% CPU,
+-- no output beyond "job paid: 30"). It does not terminate.
+--
+--   timeout 5 stack exec lindana -- defer-livelock.lind
+
+{
+  (Job, 3)
+}
+
+(Job, n) : [lob Workers (Go,); die]
+
+Workers {
+  (Go,) : [lob Error (Error, Demo, ("late", 30)); sleep 25; bytesBind GoGate [1]; die]
+}
+
+(Bytes, GoGate) : [lob Error (SpecialistGo,); die]
+
+Error {
+  (Error, Demo, (s, n)), rd(SpecialistGo,) : [say "specialist: %s %i" s n; exit 0]
+  (Error, Demo, r) : [(HeadCheck, r)]
+  (HeadCheck, r!) : [lob Error (Error, Demo, r)]
+}
