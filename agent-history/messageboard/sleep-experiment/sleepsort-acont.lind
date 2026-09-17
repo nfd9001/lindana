@@ -1,0 +1,45 @@
+-- SLEEPSORT, ACONT-EXPLICIT — sleepsort-not.lind with every Terse
+-- sequence hand-desugared into the §5 Restricted-machine chain it is
+-- sugar for (see README.txt). Same program, no Terse brackets left.
+--
+-- The §5 rules applied: each step of a sequence becomes its own
+-- Restricted machine; the compiler-generated continuation atoms
+-- (ACont0, ACont1, …) link the steps; the closure (the variables the
+-- remaining suffix still needs) travels in the continuation tuple;
+-- the atoms are NOT scoped per-invocation, so concurrent firings of
+-- the same machine share the same continuation atoms — chosen chaos.
+--
+-- Declared machines here: 9 (was 4 in the Terse version). With the
+-- 5-number input the RUN makes ~27 machine activations: the worker
+-- chain (2 steps × 5 elements + the empty-list step), 5 three-step N
+-- chains, and the exit. The bag spends the whole run carrying ACont
+-- tuples the program text never mentions.
+
+{
+  (Sort, 0, [3, 1, 4, 1, 5])
+}
+
+-- worker: [(N, h); (Sort, l + 1, t)] desugared
+(Sort, l, [h | t]) : [(N, h); (AContW, l, t)]
+(AContW, l, t)     : (Sort, l + 1, t)
+(Sort, l, [])      : (Counter, l)
+
+-- N, else branch (r > 1): [(Counter, r - 1); sleep; say] desugared.
+-- The if picks the entry continuation; the closure (n) travels as
+-- data, exactly as §5's closure conversion says.
+(N, n), (Counter, r) :
+  if r == 1 then [(AContE, n)] else [(Counter, r - 1); (ACont0, n)]
+(ACont0, n)        : [sleep n * 10; (ACont1, n)]
+(ACont1, n)        : [say "%i" n]
+
+-- N, then branch (r == 1): the last claimer. Its terminal token is
+-- still the bytesBind gate — under the SHIPPED runtime a plain
+-- write hoists to the step's match time, so [say "%i" n; (Last,)]
+-- lands (Last,) before the say effect runs. Under the intended
+-- model (README: match → work → handoff, post-work) the handoff is
+-- post-work by definition and the terminal step is just a write —
+-- the gate is a shim for the missing semantics.
+(AContE, n)        : [sleep n * 10; (ACont2, n)]
+(ACont2, n)        : [say "%i" n; bytesBind Last [1]]
+
+(Bytes, Last)      : exit 0

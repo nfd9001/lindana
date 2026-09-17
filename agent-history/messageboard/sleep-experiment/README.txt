@@ -69,13 +69,20 @@ why sleepsort-not.lind's terminal token is a `bytesBind` gate, not a
 plain write.
 
 THE INTENDED MODEL (recorded as a design position, provisional,
-flip-worthy): sequencing SHOULD enforce ordering — the implicit
-continuation is real semantics, not sugar: an action list is a chain
-of steps, each step its own transaction, and a machine's later steps
-do not run until its earlier effects have completed. Motivated by
-this experiment (sleepsort's terminal token should be writable as
-`[sleep n * 10; say "%i" n; (Counter, 0)]` — list position meaning
-what it says) and by the PR #29 comment's "what should race and what
+flip-worthy): the implicit continuation is real semantics, not
+sugar. Each Restricted machine's life is: MATCH ONCE (its join — the
+only time it reaches into the bag) → DO ITS WORK → HAND OFF (emit
+the next continuation tuple, post-work). The handoff is what carries
+the ordering: the next machine cannot start until the handoff lands,
+and the handoff cannot happen until the work is done. So in the
+nonzero counter branch, the sleeper's work is only the sleep — it
+sleeps, then hands off to the implicit next machine; the sayer says,
+then hands off (or doesn't — end of list, the instance is done and
+only then may a looping declaration re-arm and look back in the bag).
+Motivated by this experiment (sleepsort's terminal token should be
+writable as `[sleep n * 10; say "%i" n; (Counter, 0)]` — list
+position meaning what it says, the terminal handoff landing
+post-say) and by the PR #29 comment's "what should race and what
 should synchronize": a write and a later effect in the same list are
 synchronized, not racing.
 
@@ -93,6 +100,39 @@ per-bag runners would make it bag-local, per-machine runners
 machine-local, and sleepsort-not.lind (which wants l instances
 delaying concurrently, not serialized) is the test for how much
 serialization is too much.
+
+THE ACONT LENS — desugaring the Terse lists makes the machine count
+visible. sleepsort-acont.lind (runnable) is sleepsort-not.lind with
+every Terse sequence hand-desugared per §5's rules: each step its
+own Restricted machine, the closure travelling in the continuation
+tuple, the ACont atoms un-scoped per invocation (chosen chaos). 4
+declarations become 9; the 5-number run is ~27 machine activations
+the program text never mentions. Findings:
+
+  * The collapsed runtime and the explicit chain are observationally
+    equivalent HERE: identical output, deterministic across 8 runs.
+    §13.3's "falls out of the loop re-arming" is vindicated for this
+    program.
+  * The fiction grants exactly the "l copies of N" the design needs —
+    under §5 a machine is a reaction RULE and each firing is an
+    instance, so 5 enabled (N, n) reactions are 5 instances. The two
+    runtime collapses (thread-per-declaration, global runner) are
+    what deny them concurrency — not the desugaring.
+  * The bytesBind verdict: the registered bytestring is dead payload
+    (never read); what it buys is timing — the only verb whose side
+    effect (a completion tuple) lands AFTER earlier effects in the
+    same bundle, because the shipped runtime hoists handoff writes to
+    match time. Under the intended model the gate evaporates: the
+    handoff is post-work by definition, so the terminal step is just
+    a write — v2's original list-position shape was already correct
+    there, and "if we just wanted an atom we can just use one"
+    becomes true. v3's gate is a shim for the missing semantics.
+  * The un-scoped-ACont chaos (concurrent firings sharing AContN
+    atoms) is live in this program by design — 5 chains share
+    ACont0/ACont1 — but did not bite: the payload travels in the
+    tuple and the observed order stayed deterministic (8/8 runs). A
+    flip that materializes chains concurrently makes the hazard
+    real; chosen, documented chaos.
 
 --------------------------------------------------------------------
 FINDING 2: rest capture is LOSSY on unspliced re-emit.
