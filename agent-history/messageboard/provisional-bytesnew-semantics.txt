@@ -1,0 +1,65 @@
+provisional bytesNew semantics (§13.23, branch runtime/bytes-new)
+===================================================================
+
+Issue #18 part 3: "we should be able to generate handles for
+otherwise-anonymous strings during runtime (randomly? flatly, like
+ACont?)". Seven calls made here, all provisional / flip-worthy:
+
+1. bytesNew takes the CONTENT: `bytesNew e` registers e's UTF-8 bytes
+   under the fresh handle (allocation + bind in one verb). The bare
+   "allocate an empty handle" reading was rejected as half-useless:
+   the only content paths would be fread-clobber, and the natural
+   use (anonymous string -> bytestring) would need two steps.
+
+2. Names are a FLAT COUNTER: `Bytes0`, `Bytes1`, ... — the ACont
+   precedent, the issue's "flatly, like ACont?". Rejected: random
+   (uuid-ish) names — determinism is a house value (rand's seed is
+   fixed; runs are reproducible), and burning the shared rand state
+   for names would make every program's rand sequence shift.
+
+3. The pick happens at EFFECT time, not commit time. `EffBytesNew`
+   carries only the codepoints; the runner calls freshBytesSTM just
+   before registering. Reason: the skip must see earlier-landed
+   binds, including one earlier in the SAME bundle (same-bundle FIFO)
+   — a commit-time pick reads the side-table before its own bundle's
+   bind has landed and would collide. (The EffImport precedent:
+   effect-time reads honor the landed state.)
+
+4. The gate tuple is the ORDINARY (Bytes, H) — no dedicated
+   (BytesNew, H) tag. bytesNew IS a bind under a generated name; the
+   universal gate keeps the §14 table unchanged. Flip-worthy if a
+   consumer ever needs to distinguish generated handles from user
+   binds at the gate (today: grab the gate and bytesCompare, or match
+   the decoded content).
+
+5. Generated names NEVER mangle. Nothing in any source spells them —
+   only source mentions mangle (the hide-list precedent) — so a
+   module's anonymous handles are unique program-wide without
+   namespace help. Hazard (shared with all generated-name schemes):
+   the namespace is flat and program-global, so a module cannot
+   rename its own fresh handles; it does not need to.
+
+6. Skip, not quarantine. Generation skips names already IN the
+   side-table, so an explicit bytesBind Bytes0 … before the bytesNew
+   is honored. It cannot prevent a LATER user bind clobbering a fresh
+   handle — same manual-lifetime chaos as every side-table entry
+   (opt-out, §12). "Reserved prefix" enforcement (make Bytes<n>
+   unspellable) was rejected: no new lexical class, and un-spellable
+   atoms would break %a-rendered round-trips of panic payloads.
+
+7. The issue's stretch goal — inline auto-promotion on a machine RHS
+   (`fwrite Stdout "hi"` promoting the literal) — is DEFERRED, not
+   dropped. It needs PARSE-time fresh names (a second parser counter,
+   ACont-style) rather than runtime ones, i.e. a different mechanism
+   from this slice; also gated on deciding whether promotion is
+   literal-shaped-cons-lists-only or any casual-string expression
+   (the latter silently changes `fwrite H [72, 105]` from an
+   unknown-handle error to a write). Untouched follow-up.
+
+Also recorded (not a flip, a documented hazard): bytesNew's gate lands
+in Global per the gate convention, and a module's machines cannot
+reach Global — same reachability wrinkle every gate effect has
+(bytesBind/fopen/fread/fwrite). A module's caller consumes the gate
+and passes the handle in as data (bytesnewmod.lind fixture, §13.23).
+A "gate into the machine's own bag" flip would change top-level
+behavior for named-bag machines; left alone.
