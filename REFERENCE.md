@@ -8,7 +8,7 @@ see `agent-history/lindana-handover.md` (the spec-of-record) and its
 about *current* behavior, this document is the one that was checked
 against the code and test suite.
 
-Status as of handover §13.19.
+Status as of handover §13.23.
 
 ---
 
@@ -26,8 +26,10 @@ stack exec lindana -- --parse file.lind     # parse + render (round-trip check)
   outputs desugared forms (see §3), which reparse to an equal AST.
 - If every machine is blocked on a match that never arrives, the run is
   reported as a deadlock: "every machine is blocked on a match that never
-  arrives; such programs need an exit/die path". Programs that end with
-  all machines dead or `exit`ed terminate normally.
+  arrives (a machine that would end in die still has to fire first); such
+  programs need an exit path". Programs that end with all machines dead
+  or `exit`ed terminate normally (the default Error machine does not
+  count — idle-exempt machines never keep a run alive).
 
 ---
 
@@ -87,7 +89,9 @@ desugar to their tuple/Int shapes and match structurally.
 - **Repeated variables require equality**: `(a, a)` does not match `(3, 4)`.
 - **Rest capture**: `x!` as the *last* element of a tuple pattern binds
   the remaining zero-or-more elements as a sub-tuple. `(c!)` matches any
-  tuple. Trailing-only, variable-only.
+  tuple. Trailing-only, variable-only. Note the capture always binds a
+  tuple: re-emitting `rest!` (spliced) is the identity, but re-emitting
+  `rest` bare wraps the value in a fresh 1-tuple per round-trip.
 - **Read modes**: a bare pattern *takes* its tuple (consumes it — `in`).
   Prefix `rd ` to *read* without consuming (broadcast/fan-out: every
   interested machine can observe the same fact). Take-clauses in one join
@@ -145,6 +149,7 @@ pattern : [action; action; action]
 | `error` | `error ("bad thing", x)` | Fire a context tuple into the error bag (§9). Tuple argument. |
 | `bytesBind` | `bytesBind H [72, 105]` | Register UTF-8 bytes of the codepoint list under atom handle `H`; emits gate tuple (§14). |
 | `bytesDestroy` | `bytesDestroy H` | Drop the bytestring entry. Manual lifetime — no GC. |
+| `bytesNew` | `bytesNew "hi"` | Register the casual string's UTF-8 bytes under a runtime-fresh handle (`Bytes0`, `Bytes1`, …, skipping taken names) and emit the ordinary `(Bytes, H)` gate — `H` the fresh handle, grabbed from the gate and used as data. |
 | `import` | `import H S []` | Load a module at runtime (§10). |
 | `reroute` | `reroute Src Tgt` | Repoint where `error` tuples from bag `Src` go (§9). Last update wins. |
 | `fopen` | `fopen H "path.txt" W` | Open a file into fd handle `H` (§13). Mode is the atom `R` or `W` (`W` truncates). |
@@ -156,7 +161,7 @@ pattern : [action; action; action]
 Reserved words (cannot be identifiers/variables):
 `in inp rd out if then else say exit die quit sleep lob error panic rand
 typeOf atomize atos bytesBind bytesDestroy bytesEqual bytesRead
-bytesCompare import reroute sayfd fopen fclose fread fwrite`.
+bytesCompare bytesNew import reroute sayfd fopen fclose fread fwrite`.
 
 ---
 
@@ -270,6 +275,18 @@ and `%b`. `bytesBind` is a deferred effect: consumers gate on the
 `==` on handles compares the handles, never the contents. There is no
 automatic reclamation — `bytesDestroy` is the manual lifetime tool.
 
+For an *anonymous* string — data built at runtime, no name chosen in the
+source — `bytesNew e` registers its bytes under a runtime-generated
+handle: a flat counter `Bytes0`, `Bytes1`, … (deterministic, like the
+`ACont` continuation names), skipping any name already in the side-table
+(so an explicit `bytesBind Bytes0 …` is honored, not clobbered). The gate
+tuple is the ordinary `(Bytes, H)`; what generation cannot prevent is a
+*later* user bind clobbering a fresh handle — manual-lifetime chaos, as
+everywhere. The handle never mangles in modules (nothing in any source
+names it); note the gate lands in `Global`, which a module's own machines
+cannot reach — a module's caller consumes the gate and passes the handle
+in as data (§10, the fd-as-data pattern).
+
 Two bytestrings are preregistered at start: `Nil → ""` (the empty-suffix
 spelling) and, via the Prelude, `Prelude → "Prelude"`. Neither is
 special: both can be clobbered or destroyed like any entry.
@@ -321,7 +338,8 @@ consumers `rd`/take them to sequence deterministically:
 
 | Effect | Gate tuple |
 |---|---|
-| `bytesBind` | `(Bytes, H)` |
+| `bytesBind`, `bytesNew` | `(Bytes, H)` |
+| `fopen` | `(Fopen, H)` |
 | `fopen` | `(Fopen, H)` |
 | `fread` | `(Fread, H)` |
 | `fwrite` | `(Fwrote, H)` |

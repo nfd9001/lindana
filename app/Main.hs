@@ -68,6 +68,7 @@ main = do
         Left e | Just BlockedIndefinitelyOnSTM <- fromException e -> do
           hPutStrLn stderr
             ("lindana: deadlock — every machine is blocked on a match "
-             ++ "that never arrives; such programs need an exit/die path")
+             ++ "that never arrives (a machine that would end in die "
+             ++ "still has to fire first); such programs need an exit path")
           exitFailure
         Left e -> throwIO e

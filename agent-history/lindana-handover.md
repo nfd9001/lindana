@@ -233,7 +233,7 @@ Because a backed-off request is **re-emitted into the open bag** rather than ret
 - **Strings (casual)**: **no primitive type either.** **Implemented** (§13.9, branch `parser/string-sugar`): a @"..."@ literal desugars at parse time to a cons-list of codepoint `Int`s — the exact shape the §11.5 list literal builds (`"hi"` IS `[104, 105]`). **Plain `Int`s all the way down — no `Char` type — provisionally resolving §11.4** on the side the design was already leaning (consistency: no new lexical class, no new runtime type; interpretation entirely up to whichever action consumes the value, §3.3). No AST nodes (`EStr`/`PStr` removed; `VStr` gone from `Val`), so the pretty-printer renders the desugared form, which round-trips. The shipped consumers share one decoder (`casualString`/`stringVal` in Runtime): `say %s` decodes a codepoint list; `atomize` decodes then checks capitalization (§4 fatal on lowercase — still a provisional Haskell-level error); `atos` hands back a casual string; `bytesBind`'s codepoint-list check uses the same decoder. Documented hazards rather than guards: `typeOf` of a casual string reports `Tuple` (its shape — there is no `Str` tag), and `==` on two casual strings is a §3.3 type error (only atom identity and numerics compare; structural matching is the way to compare list-shaped values).
 - **Characters**: **no primitive type** (consistent with §11.4). **Implemented** (§13.10, branch `parser/char-sugar`, issue #12): @'x'@ literal sugar desugars at parse time to the single codepoint as a plain `Int` — @'a'@ IS @97@, exactly the element shape the string/list literals build from — @''@ is a synonym for the `Nil` atom, and wrapping multiple codepoints in @'…'@ is a parse error (use a string). Escapes resolved before the codepoint is taken (@\n@, @\t@, @\'@, @\\@). Purely syntactic — no AST nodes, so the pretty-printer renders the desugared form (`'+'` renders as `43`, `''` as `Nil`), which round-trips. Consequence (intended, per issue #12's bullet 3): chars cons into casual strings and feed `bytesBind` like any other codepoints, so "promoting" a string to a bytestring is already just `bytesBind H "…"` or a char list.
 - **Strings (real/UTF-8)**: since primitive strings were dropped, real string work goes through **opaque bytestring handles** rather than a first-class type. **Implemented** (§13.8, branch `runtime/bytestring-side-table`):
-  - `bytesBind Handle codepoint-list` registers the UTF-8 encoding under the (compile-time-chosen) atom handle; the effect runner emits a **`(Bytes, H)` completion tuple into `Global`** when the side-table write lands — the deterministic gate consumers join on (binds are deferred effects, §7.2). This is also the return path a future dynamic `bytesNew` would need (fresh-name generation: still open).
+  - `bytesBind Handle codepoint-list` registers the UTF-8 encoding under the (compile-time-chosen) atom handle; the effect runner emits a **`(Bytes, H)` completion tuple into `Global`** when the side-table write lands — the deterministic gate consumers join on (binds are deferred effects, §7.2). This is also the return path `bytesNew` uses (§13.23, issue #18 part 3 — the fresh-name generation is now the flat `Bytes<n>` counter; flip-worthy).
   - The side-table is `rtsBytes :: TVar (Map Name ByteString)` on the RTS. To the matcher a handle is just an ordinary atom — no special case in matching logic.
   - **`==` stays pure atom identity, uniformly, everywhere** — now actually true: `Eq`/`Neq` on `VAtom` operands used to be a Haskell error; `arith` compares atom names (§3.3: comparing handles compares the handles, not the contents). `bytesEqual(a, b)` is the builtin that reaches into the side-table for real content comparison (missing handle = provisional Haskell error, §3.3 routing pending).
   - `say "%b"` formats a bytestring handle by decoding its bytes (unknown handle / invalid UTF-8 = provisional Haskell errors).
@@ -279,7 +279,7 @@ Roughly in order of how foundational they are:
 9. **`die` vs. `quit`** — used interchangeably in discussion; exact keyword not finalized.
 10. **Top-level program grammar**: now that named bags exist, how do multiple `Name { ... }` blocks, `Global`'s implicit initial-tuple literal, and any other bag's initial state compose into one program's file-level syntax? Flagged early, never revisited. **Provisionally resolved** (§13.6, branch `runtime/named-bags-loader`): a `{ … }` initial block belongs to its nearest enclosing bag — top level is `Global`'s; at most one per bag; nothing else nests (a bag block may not contain another bag block, §6 — sharding is internal, §6.3).
 11. **Bytestring reclamation** — explicitly punted for now (§9); revisit if it matters later.
-12. **Default-Error-machine shutdown hazard**: a program that declares no `Error` block (so the §6.4 default `(c!) : panic c` machine is installed), has no `exit` path, and whose machines all terminate via `die` can never shut down cleanly — the default machine is an immortal parked thread, `rtsLive` never reaches 0, and the RTS aborts with `BlockedIndefinitelyOnSTM`, which Main.hs reports as the §1 deadlock message (exit 1) for what should be a clean exit 0. Repro and candidate fixes in `agent-history/messageboard/sleep-experiment/README.txt` (finding 5), discovered during the §13.21 sleep experiment. Open.
+12. **Default-Error-machine shutdown hazard**: a program that declares no `Error` block (so the §6.4 default `(c!) : panic c` machine is installed), has no `exit` path, and whose machines all terminate via `die` can never shut down cleanly — the default machine is an immortal parked thread, `rtsLive` never reaches 0, and the RTS aborts with `BlockedIndefinitelyOnSTM`, which Main.hs reports as the §1 deadlock message (exit 1) for what should be a clean exit 0. Repro and candidate fixes in `agent-history/messageboard/sleep-experiment/README.txt` (finding 5), discovered during the §13.21 sleep experiment. — **provisionally resolved** (§13.22, branch `runtime/idle-shutdown`): idle-exempt machines (`machIdle`) are not counted in the live total, and the shutdown check drains idle bags before cancelling so the guaranteed panic survives. Flip-worthy if any future machine class needs "parks forever but still gates shutdown".
 
 ---
 
@@ -1191,3 +1191,131 @@ synchronize strategy, and to flip #8 of
   sleepsort as its acceptance test; the finding-2 sentence for
   REFERENCE.md rides along with whichever slice next touches rest
   capture or the reference.
+
+### 13.22 Done — idle-exempt default Error machine (§11.12), branch `runtime/idle-shutdown`
+
+Closes the shutdown hazard opened by §13.21/§11.12: a program with no
+`Error` block, no `exit`, and all machines ending in `die` reported
+the §1 deadlock message (exit 1) instead of ending cleanly — the
+default §6.4 Error machine parked forever, `rtsLive` never reached 0,
+and the RTS aborted with `BlockedIndefinitelyOnSTM`.
+
+- **`machIdle` on `MachineDef`** (Lindana.Def): idle-exempt machines
+  do not keep the run alive. Only the loader's synthetic default
+  Error machine sets it (top level and via `lowerModule` for
+  modules); every user machine and the §13.15 prelude-import one-shot
+  are non-idle.
+- **Live accounting** (Lindana.Machine): `runLoaded` initializes
+  `rtsLive` to the non-idle count; `machineThread`'s `finally`
+  decrements only for non-idle machines; `installModule` credits
+  `+(k′ − 1)` where `k′` counts non-idle module machines (the −1
+  still settles the §13.13 pending-import slot — the §13.15
+  leaked-slot shape would resurface otherwise).
+- **The drain guard**: exempting the default machine alone would let
+  shutdown cancel it while an error tuple sits unclaimed — silently
+  dropping the §6.4 guaranteed panic (the dying machine's `decLive`
+  and the parked default's grab are disjoint STM transactions; a
+  pure live-count fix is genuinely racy). The run-alive check now
+  also reads the idle machines' bags and waits until they are empty
+  before proceeding: the parked machine's grab is already woken by
+  the tuple write, the grab empties the bag, the panic bundle sets
+  `rtsExit`, and the check passes on either arm. Deterministic both
+  ways: clean exit when nothing is pending, guaranteed panic when an
+  error tuple arrived.
+- **Tests**: MachineSpec gains a loader-driven "shutdown (§11.12)"
+  block — the all-die/no-Error-block shape now ends `ExitSuccess`
+  (it timed out before the fix), and the one-shot `error` shape still
+  panics with `ExitFailure 1` (hook fired, exit preserved). A panic
+  message renders its payload structurally (codepoint cons-list), so
+  the test asserts on the hook firing, not a payload substring — the
+  §13.12/§13.18 render story, learned the hard way. ModuleSpec gains
+  the module path via the new `test/modules/quiet.lind` fixture
+  (one-shot `die`, no Error block: its imported default machine must
+  not keep the run alive — this timed out before the fix).
+- Full test suite green (211 cases, randomized order), zero `-Wall`
+  warnings. CLI verified: the C1 repro (`{ (Tick,) } … [say "hi"; die]`)
+  exits 0; `sleepsort-not.lind` now exits 0 (its false-deadlock arm
+  is gone — it still prints one number, which is the §11.7
+  sleep-serialization story, untouched here); `examples/throttle.lind`
+  still reports its genuine deadlock, exit 1.
+- **Next**: the §11.7 runner-scope flip remains the big open thread
+  (sleepsort acceptance test per §13.21); the REFERENCE.md
+  rest-capture sentence from §13.21's finding 2 still rides along
+  with a future reference touch; `Main.hs`'s deadlock message could
+  now mention the all-die shutdown shape if a docs pass wants it.
+
+### 13.23 Done — `bytesNew`, runtime-fresh bytestring handles (§9, issue #18 part 3), branch `runtime/bytes-new`
+
+Closes issue #18's part 3: handles for otherwise-anonymous strings.
+`bytesNew e` registers the UTF-8 encoding of the casual string `e` under
+a runtime-generated atom handle and emits the ordinary `bytesBind` gate
+tuple `(Bytes, H)` — `H` the fresh handle, delivered as data. The
+consumer grabs it from the gate and passes it around like any handle
+(the §13.17 fd-as-data pattern).
+
+- **The verb** (Syntax/Parser): `bytesNew e` — one expression argument
+  (the casual string, resolved in-transaction, the `bytesBind`
+  precedent); no handle position exists, since nothing in the source
+  names the result. Reserved word; renders and round-trips; the
+  content expression mangles and nothing else (the fresh name is
+  runtime data, never written in any source — only source mentions
+  mangle, the hide-list precedent), so a module's anonymous handles
+  are unique program-wide without namespace help.
+- **Fresh-name generation** (Lindana.Machine `freshBytesSTM`): the
+  issue's "randomly? flatly, like `ACont?`" — resolved toward *flat*:
+  a counter `TVar` on the RTS (`rtsFresh`), names `Bytes0`, `Bytes1`,
+  …, skipping any name already present in the side-table (an explicit
+  `bytesBind Bytes0 …` is honored, not clobbered). Deterministic (no
+  `rand` burn — runs stay reproducible), inspectable, and
+  un-guarded: a user bind queued *after* the `bytesNew` still clobbers
+  the fresh handle — manual-lifetime chaos, opt-out as usual (§12).
+- **The name is picked at EFFECT time, not commit time**
+  (`EffBytesNew` carries only the codepoints; the `EffImport`
+  precedent — effect-time reads honor the landed state): a
+  `bytesBind Bytes0 …` earlier in the same action list lands first
+  (same-bundle FIFO), so the skip sees it; a commit-time pick would
+  collide (the commit-time side-table does not have it yet). The
+  side-table registration + gate emit is shared with `EffBytesBind`
+  (`bytesBindEffect`); the gate tag stays `(Bytes, H)` — the
+  universal bytes gate, no new tag.
+- **The module story, and its one reachability wrinkle**: the gate
+  convention emits into `Global` — which a module's own machines
+  cannot reach (pre-existing for every gate: `bytesBind`/`fopen`/
+  `fread`/`fwrite` gates are all Global-only). A module's `bytesNew`
+  therefore works (mangling-free, unique) but its own machines cannot
+  gate on the result; the caller consumes the gate and passes the
+  handle in as data (tested e2e with `test/modules/bytesnewmod.lind`).
+  Recorded as a hazard of the gate convention, not guarded; a
+  future "gate into the machine's own bag" flip would change
+  top-level behavior for named-bag machines and is left alone.
+- **Not done here (the issue's stretch goal)**: inline auto-promotion
+  on a machine RHS (e.g. `fwrite Stdout "hi"` promoting the literal to
+  an anonymous bytestring). Needs parse-time fresh names (a second
+  parser counter, the `ACont` precedent) — recorded in the messageboard
+  note and left as the follow-up sugar slice.
+- **Docs riders** (both from §13.22's Next): the REFERENCE.md
+  rest-capture sentence (§13.21 finding 2 — `rest!` splice is the
+  identity, bare re-emit wraps in a 1-tuple; §4) landed in this PR's
+  reference touch, and `Main.hs`'s deadlock message now mentions the
+  all-die shape ("a machine that would end in die still has to fire
+  first; such programs need an exit path"), with REFERENCE §1's quote
+  updated to match.
+- **Messageboard**: `agent-history/messageboard/provisional-bytesnew-semantics.txt`
+  — seven flip-worthy calls (content-carrying `bytesNew`, the flat
+  counter, effect-time pick, the shared `(Bytes, H)` gate, no
+  mangling of generated names, later-clobber chaos, deferred
+  auto-promotion sugar).
+- Full test suite green (222 cases, randomized order, 3× repeat
+  stable), zero `-Wall` warnings. `examples/bytesnew.lind` verified
+  via CLI (deterministic output; the `%a` render shows the skip: a
+  pre-taken `Bytes0` pushes the fresh pair to `Bytes1`/`Bytes2`) and
+  `--parse` round-trip (fixed point; the rendered form also runs).
+  All pre-existing examples re-verified (the three non-standalone
+  demos still exit 1 when run directly).
+- **Next**: inline auto-promotion sugar (parse-time flat counter,
+  the `ACont` mechanism generalized to anonymous bytes) — the issue's
+  stretch goal, now unblocked; `bytesBind`'s handle position could
+  become an expression (handles-as-data for binds) so a fresh handle
+  can be re-bound, the one content path `bytesNew` does not open.
+  Unchanged carries: the §11.7 runner-scope flip (sleepsort
+  acceptance test), unified error routing (§3.3/§7.3), append mode.

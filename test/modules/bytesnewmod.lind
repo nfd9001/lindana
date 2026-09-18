@@ -1,0 +1,8 @@
+-- bytesnewmod: the §13.23 module fixture (issue #18 part 3). The
+-- module one-shot bytesNew's an anonymous string and dies — the fresh
+-- handle is runtime data, never written in any source, so nothing here
+-- needs the namespace except the usual bag/tag mangling (Log_v2). The
+-- gate tuple (Bytes, h) lands in Global per the gate convention —
+-- which a module's machines cannot reach — so the CALLER gates on it
+-- and puts the handle to work (fd-as-data). See ModuleSpec §13.23.
+Log { : bytesNew "module-made" }

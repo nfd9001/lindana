@@ -77,6 +77,7 @@ reservedWords = Set.fromList
   , "lob", "error", "panic"
   , "rand", "typeOf", "atomize", "atos"
   , "bytesBind", "bytesDestroy", "bytesEqual", "bytesRead", "bytesCompare"
+  , "bytesNew"
   , "import", "reroute", "sayfd"
   , "fopen", "fclose", "fread", "fwrite"
   ]
@@ -446,6 +447,7 @@ actionP = choice
   , sayfdP
   , bytesBindP
   , bytesDestroyP
+  , bytesNewP
   , importP
   , fileP
   , sayP
@@ -536,6 +538,15 @@ bytesBindP = rword "bytesBind" *> (BytesBind <$> atomIdent <*> exprP)
 
 bytesDestroyP :: Parser Action
 bytesDestroyP = rword "bytesDestroy" *> (BytesDestroy <$> exprP)
+
+-- | §9 (issue #18 part 3): @bytesNew e@ — the casual string @e@ (a
+-- codepoint cons-list, usually a @\"...\"@ literal) registered under a
+-- runtime-fresh atom handle. The handle is /not/ written in the source —
+-- the effect runner generates it and delivers it via the @(Bytes, H)@
+-- gate (the ordinary bytesBind gate); the consumer grabs it from there
+-- (handles as data). See "Lindana.Machine" for the naming scheme.
+bytesNewP :: Parser Action
+bytesNewP = rword "bytesNew" *> (BytesNew <$> exprP)
 
 -- | Issue #17 (§13.13): @import H S Hide@ — three expressions: the
 -- module-name handle, the namespace-suffix handle, and the hide list

@@ -28,6 +28,7 @@ import Lindana.Syntax
 data MachineDef = MachineDef
   { machBag  :: Name        -- ^ bag whose block the machine was declared in
   , machSfx  :: String      -- ^ ambient namespace suffix (§13.13; @\"\"@ at top level)
+  , machIdle :: Bool        -- ^ idle-exempt: does not keep the run alive (§11.12)
   , machJoin :: [PatElem]
   , machBody :: [Action]
   } deriving (Eq, Show)

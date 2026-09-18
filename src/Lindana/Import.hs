@@ -170,6 +170,12 @@ mangleAction sfx a = case a of
   -- mangles; a variable (bag name as data) must not.
   Lob n e        -> Lob (mangleExpr sfx n) (mangleExpr sfx e)
   BytesBind h e  -> BytesBind (h ++ sfx) (mangleExpr sfx e)
+  -- §9 (issue #18 part 3): only the CONTENT expression mangles — its
+  -- atoms are ordinary source mentions. There is no handle position to
+  -- mangle: the fresh name is runtime data ('freshBytesSTM'), never
+  -- written in any source, so a module's bytesNew handles are unique
+  -- program-wide without any namespace help (the hide-list precedent:
+  -- only source mentions mangle).
   -- The hide list names the target module's pre-mangle API: exempt
   -- (module header). The name/suffix handles are this module's own
   -- atoms: mangled, consistent with its own bytesBind of them.
@@ -211,6 +217,7 @@ mangleAction sfx a = case a of
   -- error's target bag is routed at runtime (errorBag ++ machSfx):
   -- no AST rewrite needed.
   BytesDestroy e -> BytesDestroy (mangleExpr sfx e)
+  BytesNew e     -> BytesNew (mangleExpr sfx e)
   Die            -> a
   If c t e       -> If (mangleExpr sfx c)
                        (map (mangleAction sfx) t)

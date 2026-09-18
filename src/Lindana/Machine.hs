@@ -16,7 +16,7 @@
 --     @error@'s Error-tuple write) execute inside that transaction,
 --     atomically with the match and each other. Every irrevocable
 --     verb (@say@, @sleep@, @exit@, @panic@, @bytesBind@,
---     @bytesDestroy@) comes back as a deferred /bundle/ of effects,
+--     @bytesDestroy@, @bytesNew@) comes back as a deferred /bundle/ of effects,
 --     pushed post-commit.
 --
 --   * The 'effectRunner' is a single thread draining bundles FIFO
@@ -26,7 +26,9 @@
 --     (§7.3 still open). Bytestring side-table work (§9) routes
 --     through it too (§11.8, provisionally resolved): a bind writes
 --     'rtsBytes' and emits the @(Bytes, H)@ completion tuple into
---     @Global@; a destroy just drops the entry.
+--     @Global@; a destroy just drops the entry; @bytesNew@ (issue #18
+--     part 3) picks a fresh handle in-transaction ('freshBytesSTM')
+--     and lands as the very same bind effect.
 --
 --   * Module import (issue #17, §13.13): the @import@ effect loads a
 --     module file at runtime (via "Lindana.Import"), suffix-mangles
@@ -66,6 +68,17 @@
 --     @Nil → ""@; neither entry is special. One-shot preregistration
 --     machines only — a looping service in the default import would
 --     keep every program alive forever.
+--
+--   * Idle-exempt machines (§11.12, branch `runtime/idle-shutdown`):
+--     the §6.4 default Error machine has @machIdle = True@ — it is
+--     not counted in 'rtsLive' and does not keep the run alive, so a
+--     program whose user machines all @die@ ends cleanly even though
+--     the default machine is still parked. The run-alive check waits
+--     for idle bags to drain first, so a final error tuple still
+--     gets its guaranteed panic. Why: the parked default machine
+--     otherwise false-deadlocks every all-die program (the §1
+--     shutdown story told machines to end in @die@, and the most
+--     natural shape for that had no Error block and no @exit@).
 --
 -- §11.6 (effect-bundle grammar) is provisionally resolved here as a
 -- decision note rather than syntax: the bundle /is/ a machine
@@ -182,7 +195,11 @@ data RTS = RTS
                                       -- pending slot is what keeps the
                                       -- run-alive check from firing while
                                       -- an import bundle is still queued
-                                      -- (§13.13)
+                                      -- (§13.13). Idle-exempt machines
+                                      -- (machIdle, §11.12 — the default
+                                      -- Error machine) are not counted:
+                                      -- they never terminate, and must
+                                      -- not keep the run alive.
   , rtsExit  :: TVar (Maybe ExitCode)
   , rtsStop  :: TVar Bool             -- ^ graceful effect-runner shutdown
   , rtsBags  :: TVar (Map Name RBag)  -- ^ named bags other than @Global@
@@ -239,6 +256,16 @@ data RTS = RTS
                                       --   flip-worthy), and @fclose
                                       --   Stdout@ makes every later @say@
                                       --   a fatal, honestly.
+  , rtsFresh :: TVar Int              -- ^ fresh-name counter (§9, issue
+                                      --   #18 part 3): @bytesNew@'s
+                                      --   runtime-generated handles count
+                                      --   flatly up from 0 (@Bytes0@,
+                                      --   @Bytes1@, … — the @ACont@
+                                      --   precedent), skipping any name
+                                      --   already in 'rtsBytes'. A plain
+                                      --   counter, not @rand@: determinism
+                                      --   (runs are reproducible) and no
+                                      --   burning the shared seed.
   , rtsHooks :: Hooks
   }
 
@@ -324,13 +351,14 @@ newRTSWith hooks = do
       , (stdFdOut, FdState hout FdWrite False False)
       , (stdFdErr, FdState herr FdWrite False False)
       ])
+    fresh <- newTVar 0
     pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
              , rtsLive = live, rtsExit = exit, rtsStop = stop
              , rtsBags = bags, rtsBytes = bytes
              , rtsMods = mods, rtsExtra = extra
              , rtsReroute = reroute, rtsSayFd = sayFd
              , rtsHooks = hooks
-             , rtsFds = fds
+             , rtsFds = fds, rtsFresh = fresh
              }
 
 -- | Resolve a bag name to its 'RBag' (§6). @Global@ is the main bag;
@@ -398,9 +426,21 @@ data Effect
                           --   UTF-8 encoding of the codepoints under the
                           --   atom handle, then emit @(Bytes, H)@ into
                           --   @Global@ (the bind's completion tuple,
-                          --   the deterministic gate for consumers)
+                          --   the deterministic gate for consumers).
+                          --   Also @bytesNew@'s landing spot (§9, issue
+                          --   #18 part 3) is a sibling effect —
+                          --   'EffBytesNew' carries the codepoints and
+                          --   picks the fresh handle at effect time.
   | EffBytesDestroy Name  -- ^ @bytesDestroy H@ (§9) — drop the entry;
                           --   later lookups are the user's to guard
+  | EffBytesNew [Int]     -- ^ @bytesNew cps@ (§9, issue #18 part 3) —
+                          --   register the UTF-8 encoding of the
+                          --   codepoints under a runtime-fresh handle
+                          --   ('freshBytesSTM', picked HERE at effect
+                          --   time: every earlier-landed bind counts
+                          --   against the name skip), then emit the
+                          --   ordinary @(Bytes, H)@ gate into @Global@ —
+                          --   H the fresh handle, delivered as data.
   | EffImport Name Name [Name] String
                           -- ^ @import H S Hide@ (§13.13) — load a module
                           --   at runtime: name handle, suffix handle,
@@ -652,6 +692,17 @@ interpretActions rts bag sfx bagName env = go []
           VAtom n -> pure n
           _ -> error "bytesDestroy: handle must be an atom (§9)"
         go (EffBytesDestroy n : acc) rest
+      BytesNew e -> do
+        -- §9 (issue #18 part 3): a bytestring for an otherwise-anonymous
+        -- string. Only the CONTENT resolves in-transaction (the bytesBind
+        -- precedent); the FRESH NAME is picked at EFFECT time
+        -- ('EffBytesNew' — the EffImport precedent: effect-time reads
+        -- honor the landed state, and every earlier-landed bind —
+        -- including one earlier in this same bundle — counts against
+        -- the name skip). The gate tuple is the ordinary @(Bytes, H)@,
+        -- H the fresh handle.
+        cps <- codepoints <$> evalR rts env e
+        go (EffBytesNew cps : acc) rest
       Import nh sh hide -> do
         -- §13.13: a pending-import slot in the live count, claimed
         -- NOW in-transaction. The run-alive check (@live == 0@) must
@@ -733,6 +784,31 @@ interpretActions rts bag sfx bagName env = go []
 -- 'casualString'.
 codepoints :: Val -> [Int]
 codepoints = map ord . casualString
+
+-- | §9 (issue #18 part 3): pick a runtime-fresh bytestring handle —
+-- @bytesNew@'s name source. Flat counter (@Bytes0@, @Bytes1@, … — the
+-- @ACont@ precedent; the issue's "randomly? flatly, like ACont?") with
+-- a skip: a candidate already present in the side-table (a user's
+-- @bytesBind Bytes3 …@, say) is passed over, so generation never
+-- collides with what exists. Runs at EFFECT time, in the runner: every
+-- earlier-landed bind — including one earlier in the same bundle —
+-- counts against the skip, and bundles drain FIFO through the single
+-- runner (§11.7), so two @bytesNew@s can never pick the same name.
+-- What this cannot prevent is a user bind QUEUED AFTER the bytesNew
+-- clobbering the fresh handle — manual-lifetime chaos, opt-out as
+-- usual (§12). The counter itself makes generation deterministic (no
+-- @rand@ burn — runs stay reproducible), and the returned handle is
+-- runtime data — nothing in any source names it, so it never mangles
+-- (only source mentions mangle, the hide-list precedent).
+freshBytesSTM :: RTS -> STM Name
+freshBytesSTM rts = go
+  where
+    go = do
+      n <- readTVar (rtsFresh rts)
+      writeTVar (rtsFresh rts) (n + 1)
+      let cand = "Bytes" ++ show n
+      bytes <- readTVar (rtsBytes rts)
+      if Map.member cand bytes then go else pure cand
 
 -- | §13.13: @import@'s name and suffix arguments must be bytestring
 -- handles — atoms (the contents are looked up in the side-table by
@@ -878,7 +954,10 @@ truthy _               = True
 machineThread :: RTS -> RBag -> MachineDef -> IO ()
 machineThread rts bag m = go `finally` decLive
   where
-    decLive = atomically (modifyTVar' (rtsLive rts) (subtract 1))
+    -- Idle-exempt machines (§11.12) are not counted in the live total
+    -- — they park forever by design — so they never decrement it.
+    decLive = unless (machIdle m) $
+      atomically (modifyTVar' (rtsLive rts) (subtract 1))
 
     go
       | null (machJoin m) = do   -- §1: one-shot, unconditionally, at start
@@ -979,11 +1058,15 @@ runBundle rts = go
         -- §11.8 (provisionally resolved): create/destroy route through
         -- the shared effect-runner. The completion tuple lands in
         -- @Global@ (the front door) so consumers can join on it.
-        atomically $ do
-          modifyTVar' (rtsBytes rts) (Map.insert h (encodeUtf8 (T.pack (map chr cps))))
-          b <- bagForSTM rts globalBag
-          outSTM b (VTuple [VAtom "Bytes", VAtom h])
-        go es
+        bytesBindEffect rts h cps >> go es
+      EffBytesNew cps -> do
+        -- §9 (issue #18 part 3): the handle is picked HERE — effect
+        -- time — so the skip in 'freshBytesSTM' sees every
+        -- earlier-landed bind (FIFO: an earlier same-bundle bytesBind
+        -- has already landed). Same landing as a bind: side-table
+        -- write + the @(Bytes, H)@ gate.
+        h <- atomically (freshBytesSTM rts)
+        bytesBindEffect rts h cps >> go es
       EffBytesDestroy h ->
         atomically (modifyTVar' (rtsBytes rts) (Map.delete h)) >> go es
       EffImport nh sh hidden sfx -> do
@@ -1195,7 +1278,12 @@ installModule rts ms ini = do
                        outSTM b v)
                  es)
           (Map.toList ini)
-    modifyTVar' (rtsLive rts) (+ (length ms - 1))
+    -- Credit only non-idle machines (§11.12): a module's default
+    -- Error machine never terminates, and a leaked live count would
+    -- make the run-alive check never fire (the §13.15 prelude-slot
+    -- shape). The −1 still settles the pending-import slot.
+    modifyTVar' (rtsLive rts)
+                (+ (length (filter (not . machIdle) ms) - 1))
   mbags <- mapM (\m -> (,) m <$> atomically (bagForSTM rts (machBag m))) ms
   as <- mapM (\(m, b) -> async (machineThread rts b m)) mbags
   atomically (modifyTVar' (rtsExtra rts) (++ as))
@@ -1240,6 +1328,16 @@ fdIOMode FdWrite = WriteMode
 
 setExit :: RTS -> ExitCode -> STM ()
 setExit rts c = writeTVar (rtsExit rts) (Just c)
+
+-- | The shared landing of a bytestring registration (§9): the
+-- side-table write and the @(Bytes, H)@ completion tuple into @Global@
+-- — the gate @bytesBind@ and @bytesNew@ both emit ('EffBytesNew' picks
+-- its handle just before calling this).
+bytesBindEffect :: RTS -> Name -> [Int] -> IO ()
+bytesBindEffect rts h cps = atomically $ do
+  modifyTVar' (rtsBytes rts) (Map.insert h (encodeUtf8 (T.pack (map chr cps))))
+  b <- bagForSTM rts globalBag
+  outSTM b (VTuple [VAtom "Bytes", VAtom h])
 
 -- | @say@ formatting: @%i@ int, @%s@ casual string (a codepoint
 -- cons-list, decoded — §9), @%a@ render-any, @%b@ bytestring handle
@@ -1325,7 +1423,9 @@ runLoaded hooks machines initial = do
                        outSTM b v)
                  es)
           (Map.toList initial)
-    writeTVar (rtsLive rts) (length machines)
+    -- Idle-exempt machines (§11.12) are not counted: they never
+    -- terminate, and must not keep the run alive.
+    writeTVar (rtsLive rts) (length (filter (not . machIdle) machines))
   -- Resolve each machine's bag up front: the bag is fixed for the
   -- machine's lifetime (its declaration site named it), and resolving
   -- once keeps the loop from re-reading the bag map on every re-arm.
@@ -1339,11 +1439,30 @@ runLoaded hooks machines initial = do
     live <- readTVar (rtsLive rts)
     ex   <- readTVar (rtsExit rts)
     check (live <= (0 :: Int) || isJust ex)
-  -- Shutdown: machines first (no new bundles after this) — both the
-  -- startup threads and any the @import@ effect spawned mid-run
-  -- (§13.13) — then ask the runner to stop; it finishes the current
-  -- bundle and drains the queue, so every queued bundle is fully
-  -- executed before runProgram returns.
+  -- Shutdown (§11.12): machines first (no new bundles after this) —
+  -- both the startup threads and any the @import@ effect spawned
+  -- mid-run (§13.13) — then ask the runner to stop; it finishes the
+  -- current bundle and drains the queue, so every queued bundle is
+  -- fully executed before runProgram returns.
+  --
+  -- The run-alive check above counts only non-idle machines (§11.12):
+  -- the default Error machine never terminates and must not keep the
+  -- run alive. But cancellation must not race its final grab: if an
+  -- error tuple is sitting in an idle machine's bag, we wait here
+  -- until the bag drains (the parked machine's grab is already woken
+  -- — it removes the tuple and queues its panic bundle; the runner
+  -- sets @rtsExit@ when it drains that bundle, which passes the
+  -- check). Only once every idle bag is empty is cancellation honest:
+  -- there is nothing left for an idle machine to process.
+  let idleBags = map machBag (filter machIdle machines)
+  atomically $ do
+    live <- readTVar (rtsLive rts)
+    ex   <- readTVar (rtsExit rts)
+    idleEmpty <- and <$> mapM (\n -> do
+                                 b <- bagForSTM rts n
+                                 null <$> readTVar (bagTVar b))
+                              idleBags
+    check (live <= (0 :: Int) && idleEmpty || isJust ex)
   mapM_ cancel mths
   extras <- readTVarIO (rtsExtra rts)
   mapM_ cancel extras
