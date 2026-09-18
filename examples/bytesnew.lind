@@ -1,0 +1,27 @@
+-- §9 (issue #18 part 3): bytesNew allocates a bytestring for an
+-- otherwise-anonymous string. The handle is runtime-generated — a flat
+-- counter Bytes0, Bytes1, … (the ACont precedent), skipping any name
+-- already in the side-table — and delivered via the ordinary (Bytes, H)
+-- gate tuple: the handle is data, grabbed from the gate and passed
+-- around like any other (§13.17 fd-as-data pattern). bytesNew is a
+-- deferred effect like bytesBind, so consumers gate on the completion
+-- tuple (§14). Two anonymous bytestrings never collide, and an
+-- explicit bytesBind under a name the generator would have picked is
+-- honored: generation skips taken names.
+
+: [bytesBind Bytes0 "pre-taken by a user bind"; bytesNew "alpha"; bytesNew "beta"; (Go,)]
+
+(Bytes, h), rd (Go,) : (Check, h, bytesRead(h))
+
+-- The fresh handle travels as data; bytesRead(H) is the decode-back
+-- path (§9, issue #12), so the content decides the branch — not which
+-- gate landed first. Racing matches decide who checks what (§3.1).
+(Check, h, "alpha") : (Alpha, h)
+(Check, h, "beta")  : (Beta, h)
+
+(Alpha, ha), (Beta, hb) :
+  [ if bytesEqual(ha, hb)
+      then say "same content under fresh handles?!"
+      else say "distinct anonymous bytes"
+  ; say "handles: %a and %a (Bytes0 was pre-taken, so generation skipped it)" ha hb
+  ; exit 0 ]

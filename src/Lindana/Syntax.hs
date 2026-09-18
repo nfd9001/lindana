@@ -139,6 +139,20 @@ data Action
                                 --   once the side-table write lands.
   | BytesDestroy Expr           -- ^ @bytesDestroy e@ (§9) — drop the handle's
                                 --   side-table entry (manual lifetime).
+  | BytesNew Expr               -- ^ @bytesNew e@ (§9, issue #18 part 3) —
+                                --   allocate a bytestring for an
+                                --   otherwise-anonymous string: the effect
+                                --   runner picks a runtime-fresh atom handle
+                                --   and registers the UTF-8 encoding of the
+                                --   casual string @e@ under it, then emits
+                                --   the ordinary @bytesBind@ gate tuple
+                                --   @(Bytes, H)@ into @Global@ — @H@ the
+                                --   fresh handle, for the consumer to grab
+                                --   (handles travel as data, §13.17). The
+                                --   name is /runtime data/ — generated, not
+                                --   written in any source, so it never
+                                --   mangles (only source mentions mangle).
+                                --   See "Lindana.Machine" for the naming.
   | Import Expr Expr Expr       -- ^ @import H S Hide@ (issue #17, §13.13) —
                                 --   load a module at runtime. @H@ and @S@
                                 --   evaluate to bytestring /handles/: the
@@ -270,6 +284,7 @@ renderAction (FRead e)    = "fread " ++ renderExpr e
 renderAction (FWrite h s) = "fwrite " ++ renderExpr h ++ " " ++ renderExpr s
 renderAction (BytesBind h e) = "bytesBind " ++ h ++ " " ++ renderExpr e
 renderAction (BytesDestroy e) = "bytesDestroy " ++ renderExpr e
+renderAction (BytesNew e)     = "bytesNew " ++ renderExpr e
 renderAction (Import h s hide) =
   unwords ["import", renderExpr h, renderExpr s, renderExpr hide]
 renderAction (Reroute src tgt) =

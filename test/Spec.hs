@@ -226,6 +226,29 @@ main = hspec $ do
         roundTrips ": bytesBind Greeting [72, 105]\n(H,) : [bytesDestroy H; if bytesEqual(H, H) then die else die]"
           `shouldBe` True
 
+    -- §9 (issue #18 part 3): bytesNew — the content is an ordinary
+    -- expression; there is no handle position (the fresh name is
+    -- runtime data, delivered via the (Bytes, H) gate), so nothing but
+    -- the content mangles.
+    describe "bytesNew (§9, issue #18 part 3)" $ do
+      it "parses bytesNew with a casual-string argument" $ do
+        p <- parseOk ": bytesNew \"hi\""
+        progDecls p `shouldBe`
+          [Machine [] [BytesNew (str "hi")]]
+      it "accepts any expression (a variable holding a casual string)" $ do
+        p <- parseOk "(s,) : bytesNew s"
+        progDecls p `shouldBe`
+          [Machine [PatElem Take (PTuple [PVar "s"])] [BytesNew (EVar "s")]]
+      it "reserves bytesNew (no variable named bytesNew)" $
+        isLeft (parseProgram "(bytesNew,) : die")
+      it "round-trips" $
+        roundTrips ": [bytesNew \"hi\"; bytesNew [72, 105]]" `shouldBe` True
+      it "mangles only the content expression (the fresh name is runtime data)" $ do
+        p <- parseOk ": [bytesNew \"hi\"; (Go, Tag)]"
+        progDecls (mangleProgram "_v2" p) `shouldBe`
+          [Machine [] [BytesNew (str "hi")
+                      , Out (ETuple [EAtom "Go_v2", EAtom "Tag_v2"])]]
+
     -- Issue #24: ordering comparisons. C-style precedence — ordering
     -- binds tighter than equality, additive tighter than both. Atoms
     -- order nowhere (==/!= are their whole story; the runtime rejects,
