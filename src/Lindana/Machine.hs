@@ -16,7 +16,7 @@
 --     @error@'s Error-tuple write) execute inside that transaction,
 --     atomically with the match and each other. Every irrevocable
 --     verb (@say@, @sleep@, @exit@, @panic@, @bytesBind@,
---     @bytesDestroy@) comes back as a deferred /bundle/ of effects,
+--     @bytesDestroy@, @bytesNew@) comes back as a deferred /bundle/ of effects,
 --     pushed post-commit.
 --
 --   * The 'effectRunner' is a single thread draining bundles FIFO
@@ -26,7 +26,9 @@
 --     (§7.3 still open). Bytestring side-table work (§9) routes
 --     through it too (§11.8, provisionally resolved): a bind writes
 --     'rtsBytes' and emits the @(Bytes, H)@ completion tuple into
---     @Global@; a destroy just drops the entry.
+--     @Global@; a destroy just drops the entry; @bytesNew@ (issue #18
+--     part 3) picks a fresh handle in-transaction ('freshBytesSTM')
+--     and lands as the very same bind effect.
 --
 --   * Module import (issue #17, §13.13): the @import@ effect loads a
 --     module file at runtime (via "Lindana.Import"), suffix-mangles
@@ -254,6 +256,16 @@ data RTS = RTS
                                       --   flip-worthy), and @fclose
                                       --   Stdout@ makes every later @say@
                                       --   a fatal, honestly.
+  , rtsFresh :: TVar Int              -- ^ fresh-name counter (§9, issue
+                                      --   #18 part 3): @bytesNew@'s
+                                      --   runtime-generated handles count
+                                      --   flatly up from 0 (@Bytes0@,
+                                      --   @Bytes1@, … — the @ACont@
+                                      --   precedent), skipping any name
+                                      --   already in 'rtsBytes'. A plain
+                                      --   counter, not @rand@: determinism
+                                      --   (runs are reproducible) and no
+                                      --   burning the shared seed.
   , rtsHooks :: Hooks
   }
 
@@ -339,13 +351,14 @@ newRTSWith hooks = do
       , (stdFdOut, FdState hout FdWrite False False)
       , (stdFdErr, FdState herr FdWrite False False)
       ])
+    fresh <- newTVar 0
     pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
              , rtsLive = live, rtsExit = exit, rtsStop = stop
              , rtsBags = bags, rtsBytes = bytes
              , rtsMods = mods, rtsExtra = extra
              , rtsReroute = reroute, rtsSayFd = sayFd
              , rtsHooks = hooks
-             , rtsFds = fds
+             , rtsFds = fds, rtsFresh = fresh
              }
 
 -- | Resolve a bag name to its 'RBag' (§6). @Global@ is the main bag;
@@ -413,9 +426,21 @@ data Effect
                           --   UTF-8 encoding of the codepoints under the
                           --   atom handle, then emit @(Bytes, H)@ into
                           --   @Global@ (the bind's completion tuple,
-                          --   the deterministic gate for consumers)
+                          --   the deterministic gate for consumers).
+                          --   Also @bytesNew@'s landing spot (§9, issue
+                          --   #18 part 3) is a sibling effect —
+                          --   'EffBytesNew' carries the codepoints and
+                          --   picks the fresh handle at effect time.
   | EffBytesDestroy Name  -- ^ @bytesDestroy H@ (§9) — drop the entry;
                           --   later lookups are the user's to guard
+  | EffBytesNew [Int]     -- ^ @bytesNew cps@ (§9, issue #18 part 3) —
+                          --   register the UTF-8 encoding of the
+                          --   codepoints under a runtime-fresh handle
+                          --   ('freshBytesSTM', picked HERE at effect
+                          --   time: every earlier-landed bind counts
+                          --   against the name skip), then emit the
+                          --   ordinary @(Bytes, H)@ gate into @Global@ —
+                          --   H the fresh handle, delivered as data.
   | EffImport Name Name [Name] String
                           -- ^ @import H S Hide@ (§13.13) — load a module
                           --   at runtime: name handle, suffix handle,
@@ -667,6 +692,17 @@ interpretActions rts bag sfx bagName env = go []
           VAtom n -> pure n
           _ -> error "bytesDestroy: handle must be an atom (§9)"
         go (EffBytesDestroy n : acc) rest
+      BytesNew e -> do
+        -- §9 (issue #18 part 3): a bytestring for an otherwise-anonymous
+        -- string. Only the CONTENT resolves in-transaction (the bytesBind
+        -- precedent); the FRESH NAME is picked at EFFECT time
+        -- ('EffBytesNew' — the EffImport precedent: effect-time reads
+        -- honor the landed state, and every earlier-landed bind —
+        -- including one earlier in this same bundle — counts against
+        -- the name skip). The gate tuple is the ordinary @(Bytes, H)@,
+        -- H the fresh handle.
+        cps <- codepoints <$> evalR rts env e
+        go (EffBytesNew cps : acc) rest
       Import nh sh hide -> do
         -- §13.13: a pending-import slot in the live count, claimed
         -- NOW in-transaction. The run-alive check (@live == 0@) must
@@ -748,6 +784,31 @@ interpretActions rts bag sfx bagName env = go []
 -- 'casualString'.
 codepoints :: Val -> [Int]
 codepoints = map ord . casualString
+
+-- | §9 (issue #18 part 3): pick a runtime-fresh bytestring handle —
+-- @bytesNew@'s name source. Flat counter (@Bytes0@, @Bytes1@, … — the
+-- @ACont@ precedent; the issue's "randomly? flatly, like ACont?") with
+-- a skip: a candidate already present in the side-table (a user's
+-- @bytesBind Bytes3 …@, say) is passed over, so generation never
+-- collides with what exists. Runs at EFFECT time, in the runner: every
+-- earlier-landed bind — including one earlier in the same bundle —
+-- counts against the skip, and bundles drain FIFO through the single
+-- runner (§11.7), so two @bytesNew@s can never pick the same name.
+-- What this cannot prevent is a user bind QUEUED AFTER the bytesNew
+-- clobbering the fresh handle — manual-lifetime chaos, opt-out as
+-- usual (§12). The counter itself makes generation deterministic (no
+-- @rand@ burn — runs stay reproducible), and the returned handle is
+-- runtime data — nothing in any source names it, so it never mangles
+-- (only source mentions mangle, the hide-list precedent).
+freshBytesSTM :: RTS -> STM Name
+freshBytesSTM rts = go
+  where
+    go = do
+      n <- readTVar (rtsFresh rts)
+      writeTVar (rtsFresh rts) (n + 1)
+      let cand = "Bytes" ++ show n
+      bytes <- readTVar (rtsBytes rts)
+      if Map.member cand bytes then go else pure cand
 
 -- | §13.13: @import@'s name and suffix arguments must be bytestring
 -- handles — atoms (the contents are looked up in the side-table by
@@ -997,11 +1058,15 @@ runBundle rts = go
         -- §11.8 (provisionally resolved): create/destroy route through
         -- the shared effect-runner. The completion tuple lands in
         -- @Global@ (the front door) so consumers can join on it.
-        atomically $ do
-          modifyTVar' (rtsBytes rts) (Map.insert h (encodeUtf8 (T.pack (map chr cps))))
-          b <- bagForSTM rts globalBag
-          outSTM b (VTuple [VAtom "Bytes", VAtom h])
-        go es
+        bytesBindEffect rts h cps >> go es
+      EffBytesNew cps -> do
+        -- §9 (issue #18 part 3): the handle is picked HERE — effect
+        -- time — so the skip in 'freshBytesSTM' sees every
+        -- earlier-landed bind (FIFO: an earlier same-bundle bytesBind
+        -- has already landed). Same landing as a bind: side-table
+        -- write + the @(Bytes, H)@ gate.
+        h <- atomically (freshBytesSTM rts)
+        bytesBindEffect rts h cps >> go es
       EffBytesDestroy h ->
         atomically (modifyTVar' (rtsBytes rts) (Map.delete h)) >> go es
       EffImport nh sh hidden sfx -> do
@@ -1263,6 +1328,16 @@ fdIOMode FdWrite = WriteMode
 
 setExit :: RTS -> ExitCode -> STM ()
 setExit rts c = writeTVar (rtsExit rts) (Just c)
+
+-- | The shared landing of a bytestring registration (§9): the
+-- side-table write and the @(Bytes, H)@ completion tuple into @Global@
+-- — the gate @bytesBind@ and @bytesNew@ both emit ('EffBytesNew' picks
+-- its handle just before calling this).
+bytesBindEffect :: RTS -> Name -> [Int] -> IO ()
+bytesBindEffect rts h cps = atomically $ do
+  modifyTVar' (rtsBytes rts) (Map.insert h (encodeUtf8 (T.pack (map chr cps))))
+  b <- bagForSTM rts globalBag
+  outSTM b (VTuple [VAtom "Bytes", VAtom h])
 
 -- | @say@ formatting: @%i@ int, @%s@ casual string (a codepoint
 -- cons-list, decoded — §9), @%a@ render-any, @%b@ bytestring handle

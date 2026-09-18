@@ -715,6 +715,63 @@ spec = do
       r <- runProgram [m] [t [EAtom "Go"]]
       rrBag r `shouldBe` [VTuple [VAtom "Same"]]
 
+  describe "bytesNew — runtime-fresh handles (§9, issue #18 part 3)" $ do
+    it "registers a fresh handle and emits the ordinary (Bytes, H) gate" $ do
+      -- The consumer grabs the handle from the gate — it is data, never
+      -- written in the source. Flat counter from 0 (the ACont
+      -- precedent); nothing named Bytes0 is registered yet.
+      let m = machine (take1 (PTuple [a "Bytes", v "h"]))
+            [ Out (t [EAtom "Got", EVar "h"]), Die ]
+          b = machine [] [ BytesNew (str "Hi"), Die ]
+      r <- runProgram [m, b] []
+      rrBag r `shouldBe` [VTuple [VAtom "Got", VAtom "Bytes0"]]
+    it "the fresh handle's content is the string bytesNew was given" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (PTuple [a "Bytes", v "h"]))
+            [ Say "got: %b" [EVar "h"], Die ]
+          b = machine [] [ BytesNew (consL [int 72, int 105, int 9786]), Die ]
+      _ <- runGlobal hooks [m, b] []
+      output <- said
+      output `shouldBe` ["got: Hi\9786"]
+    it "two anonymous bytestrings get distinct handles and contents" $ do
+      -- Either machine can grab either gate (the honest race, §3.1):
+      -- the verdict must be 0 ("aa" /= "bb") whichever way it lands.
+      let n1 = machine [] [ BytesNew (str "aa"), Die ]
+          n2 = machine [] [ BytesNew (str "bb"), Die ]
+          m1 = machine (take1 (PTuple [a "Bytes", v "h"]))
+                 [ Out (t [EAtom "Have", EVar "h"]), Die ]
+          m2 = machine [ PatElem Take (PTuple [a "Bytes", v "h2"])
+                       , PatElem Take (PTuple [a "Have", v "h1"]) ]
+                 [ Out (t [EAtom "Verdict"
+                          , ECall "bytesEqual" [EVar "h1", EVar "h2"]])
+                 , Die ]
+      r <- runProgram [m1, m2, n1, n2] []
+      VTuple [VAtom "Verdict", VInt 0] `elem` rrBag r `shouldBe` True
+    it "skips a name an earlier bind already landed (same-bundle FIFO)" $ do
+      -- The name is picked at EFFECT time: the Bytes0 bind earlier in
+      -- the same action list lands first, so the fresh pick passes it
+      -- over (the commit-time side-table does not have it yet — the
+      -- EffImport precedent, effect-time reads honor landed state).
+      -- Two identical collectors split the two gates between them (the
+      -- honest race, §3.1).
+      let b = machine [] [ BytesBind "Bytes0" (str "taken")
+                         , BytesNew (str "fresh"), Die ]
+          m = machine (take1 (PTuple [a "Bytes", v "h"]))
+                [ Out (t [EAtom "Got", EVar "h"]), Die ]
+      r <- runProgram [m, m, b] []
+      VTuple [VAtom "Got", VAtom "Bytes0"] `elem` rrBag r `shouldBe` True
+      VTuple [VAtom "Got", VAtom "Bytes1"] `elem` rrBag r `shouldBe` True
+      length (rrBag r) `shouldBe` 2
+    it "the fresh handle travels as data: a variable fwrites through it" $ do
+      (hooks, said, _) <- captureHooks
+      let m = machine (take1 (PTuple [a "Bytes", v "h"]))
+            [ FWrite (EAtom "Stdout") (EVar "h"), Say "done" [], Die ]
+          b = machine [] [ BytesNew (str "via fd"), Die ]
+      _ <- runGlobal hooks [m, b] []
+      output <- said   -- the Stdout capture is byte-exact; "done" rides
+                       -- the same stream after the fwrite's bytes
+      output `shouldBe` ["via fddone"]
+
   describe "file descriptors (§13.17, issue #18)" $ do
     it "writes then reads back a file through the bytestring side-table" $ do
       (hooks, said, _) <- captureHooks

@@ -304,6 +304,26 @@ spec = describe "module import (§13.13, issue #17)" $ do
     panics `shouldBe` []
     rrExit rr `shouldBe` ExitSuccess
 
+  -- §13.23 (issue #18 part 3): a module bytesNew's an anonymous
+  -- string. The fresh handle is runtime data — never written in any
+  -- source, so it needs no namespace (only source mentions mangle) —
+  -- and the gate tuple lands in Global per the gate convention, which
+  -- the module's own machines cannot reach; the caller gates on it and
+  -- puts the handle to work (fd-as-data).
+  it "a module bytesNew's an anonymous string; the caller consumes the gate (§13.23)" $ do
+    -- no-prelude: the prelude's own (Bytes, Newline/Version) static
+    -- gates would race the module's fresh gate for the (Bytes, h)
+    -- take (no ordering guarantee, §5) — pragma them out of the run.
+    (said, panics, rr) <- runMain $ unlines $
+      [ "{-# no-prelude #-}" ] ++
+      preamble "bytesnewmod" "_v2" ++
+      [ importLine
+      , "(Imported, Mod, \"_v2\"), (Bytes, h) : [fwrite Stdout h; exit 0]"
+      ]
+    said `shouldBe` ["module-made"]
+    panics `shouldBe` []
+    rrExit rr `shouldBe` ExitSuccess
+
   -- §11.12: quiet's only machine is a one-shot that dies, and it
   -- declares no Error block — so the import installs the module's
   -- default Error machine, which is idle-exempt and must not keep
