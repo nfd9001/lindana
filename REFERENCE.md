@@ -155,7 +155,7 @@ pattern : [action; action; action]
 | `fopen` | `fopen H "path.txt" W` | Open a file into fd handle `H` (§13). Mode is the atom `R` or `W` (`W` truncates). |
 | `fclose` | `fclose H` | Close a file handle (idempotent; unknown handle is a no-op). |
 | `fread` | `fread H` | Read the entire remaining content through read-mode `H` into the bytestring table under the same name; emits gate. For `Stdin`, reads one line (blocks); EOF reads as empty. |
-| `fwrite` | `fwrite H S` | Write the bytestring named by side-table handle `S` through write-mode fd `H` (flushed); emits gate. |
+| `fwrite` | `fwrite H S` | Write the bytestring named by side-table handle `S` through write-mode fd `H` (flushed); emits gate. A `"..."` literal in `S` auto-promotes (§11). |
 | `sayfd` | `sayfd Global F` | Repoint which fd `say`s from bag `Src` go through (§13). Last update wins. |
 
 Reserved words (cannot be identifiers/variables):
@@ -290,6 +290,21 @@ in as data (§10, the fd-as-data pattern).
 Two bytestrings are preregistered at start: `Nil → ""` (the empty-suffix
 spelling) and, via the Prelude, `Prelude → "Prelude"`. Neither is
 special: both can be clobbered or destroyed like any entry.
+
+**Inline auto-promotion**: a `"..."` literal in `fwrite`'s bytestring
+position promotes to an anonymous bytestring — `fwrite Stdout "hi"`
+desugars at parse time to `bytesBind Auto0 (…); fwrite Stdout Auto0`.
+The promoted names are a flat parse-time counter (`Auto0`, `Auto1`, …,
+the `ACont`-precedent scaffolding — a different counter and namespace
+from `bytesNew`'s runtime `Bytes<n>`), ordinary source atoms: they
+render, round-trip, and mangle, so a module's promoted handles
+namespace like everything else. Promotion is literal-only — a variable
+or computed codepoint list promotes nothing (`fwrite H [72, 105]` is
+still an unknown-handle error). The promoted pair shares one action
+list, so the effect bundle lands bind-before-write and no consumer
+needs the gate (it is still emitted, and sits in `Global` like every
+un-gated bind). No name reservation: a user atom spelling `Auto0` races
+it — ordinary opt-out chaos.
 
 ---
 
