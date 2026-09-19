@@ -1,0 +1,65 @@
+provisional inline auto-promotion semantics (§13.24, branch parser/inline-promotion)
+====================================================================================
+
+Issue #18's stretch goal, deferred by §13.23 and landed here: a
+`"..."` literal in `fwrite`'s bytestring position promotes to an
+anonymous bytestring. `fwrite Stdout "hi"` desugars at parse time to
+`[bytesBind Auto0 (104, (105, Nil)); fwrite Stdout Auto0]`. Six calls,
+all provisional / flip-worthy:
+
+1. LITERAL-ONLY promotion. A variable or computed codepoint list in
+   the S position promotes nothing: `fwrite H Buf` and `fwrite H
+   [72, 105]` keep their existing meaning ("write what the handle
+   names" / unknown-handle error). The alternative — promoting any
+   casual-string expression — was rejected because it would silently
+   flip `fwrite H [72, 105]` from an unknown-handle error to a write
+   (the §13.23 note's open question). A char literal `'x'` does not
+   promote either (it is a plain Int). Flip path: make `bytesBind`'s
+   handle position an expression (§13.23's carry) and promote via an
+   explicit runtime allocation instead.
+
+2. Prefix `Auto` (names `Auto0`, `Auto1`, …), NOT `Bytes<n>`. The
+   `Bytes<n>` namespace belongs to `bytesNew`'s runtime counter
+   (`rtsFresh`, effect-time skip); a parse-time counter sharing it
+   would be unordered against runtime picks across bundles — the
+   runtime skip cannot save a parse-time name from a later runtime
+   pick or vice versa. Two counters, two namespaces, no cross-talk.
+
+3. Desugar shape: the bind is PREPENDED to the write, sharing one
+   action list. The effect bundle drains FIFO, so bind lands before
+   write with no consumer needing the gate — but the ordinary
+   `(Bytes, Auto0)` gate is still emitted and, unconsumed, sits in
+   `Global` like every un-gated bind (same stray-tuple story as any
+   static bytesBind no one gates on). Alternative considered:
+   desugaring to `bytesNew` + a gate join — rejected: needs a second
+   machine (the one-shot pattern) or the gate dance per literal, and
+   the whole point of the sugar is one line.
+
+4. Promoted names are ordinary SOURCE ATOMS: they render (the
+   desugared form is what `--parse` shows), round-trip (fixed point:
+   the rendered S is an atom and does not re-promote), and mangle with
+   the module suffix — the opposite call from §13.23's bytesNew names,
+   which are runtime data and never mangle. Consequence: a module's
+   promoted handles namespace like every other atom; two modules
+   promoting the same literal cannot collide. Tested e2e
+   (test/modules/promotemod.lind).
+
+5. No interning. Two promotions of the same literal in one source
+   create two distinct handles/entries, each self-clobbered on re-fire
+   of a looping machine with identical content (harmless, but the
+   side-table leaks per distinct promoted occurrence — §11.11
+   reclamation still punted).
+
+6. No reservation. `Auto0` is a spellable atom like any other (the
+   §13.23 note 6 reasoning: no new lexical class; `%a`-rendered
+   values must round-trip). A user `bytesBind Auto0 …` racing a
+   promotion is ordinary opt-out chaos (§12) — and by construction
+   each promotion is self-contained (its own bind lands immediately
+   before its own write in one bundle), so the clobber window is
+   cross-machine queue chaos only.
+
+Also recorded (not a flip): the fresh-name machinery is SCAFFOLDING —
+'freshName' (Parser.hs) is the flat ACont-precedent counter any future
+desugar reuses. §5's Terse→Restricted desugaring is still
+unimplemented (action lists interpret directly); if it ever lands, it
+shares the helper with its own prefix rather than a second mechanism.

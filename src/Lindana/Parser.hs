@@ -3,7 +3,8 @@
 -- | Megaparsec parser for Lindana source text.
 --
 -- Layout strategy (handover §1 "one line by convention"): the parser
--- threads a bracket-nesting @Int@ state. Inside any @()@ @[]@ @{}@
+-- threads a state record: bracket-nesting depth plus a parse-time
+-- fresh-name counter ('freshName'). Inside any @()@ @[]@ @{}@
 -- grouping, newlines are insignificant whitespace; at depth zero a
 -- newline is significant — it terminates a machine. Newlines are also
 -- permitted after the structural separators @:@, @then@ and @else@ so
@@ -28,6 +29,14 @@
 -- form (which round-trips). The one string literal that survives as a raw
 -- 'String' is @say@'s format: that position is not an expression, the
 -- action consumes the literal as a format.
+--
+-- Inline auto-promotion (§9, issue #18's stretch goal, §13.24) adds
+-- one more parse-time desugar on the same principle: a @\"...\"@ literal
+-- in @fwrite@'s bytestring position promotes to an explicit
+-- @bytesBind@ of a parse-time-fresh atom ('freshName' — the flat
+-- @ACont@-precedent counter, scaffolding any future desugar that
+-- needs generated names). No AST node; the desugared form renders and
+-- round-trips.
 module Lindana.Parser
   ( parseProgram
   , PError
@@ -57,13 +66,42 @@ chainl1 p op = p >>= go
   where
     go x = (do f <- op; y <- p; go (f x y)) <|> pure x
 
--- | Bracket nesting depth: > 0 means we are inside @()@ \/ @[]@ \/ @{}@
--- where newlines are insignificant. At depth 0 a newline terminates a
--- machine.
-type Parser = ParsecT Void Text (St.State Int)
+-- | Parser state: the bracket-nesting depth (newlines insignificant
+-- inside @()@ \/ @[]@ \/ @{}@; at depth 0 a newline terminates a
+-- machine) and the parse-time fresh-name counter ('freshName').
+data PState = PState
+  { psDepth :: !Int
+  , psFresh :: !Int
+  }
+
+type Parser = ParsecT Void Text (St.State PState)
 
 parseProgram :: Text -> Either PError Program
-parseProgram src = St.evalState (runParserT programP "" src) 0
+parseProgram src = St.evalState (runParserT programP "" src) (PState 0 0)
+
+-- | Parse-time fresh atom name — the flat @ACont@-precedent counter
+-- (@prefix0@, @prefix1@, …), numbered in source order. Scaffolding for
+-- any desugar that needs compiler-generated atoms; the current
+-- consumer is @fwrite@'s inline auto-promotion (prefix @Auto@), and a
+-- future Terse→Restricted pass (§5's @ACont@ desugaring, still
+-- unimplemented — action lists interpret directly today) would share
+-- this helper with its own prefix. The prefix deliberately differs
+-- from @bytesNew@'s runtime counter (@Bytes<n>@): two counters, two
+-- namespaces, no cross-talk (the runtime skip could not save a
+-- parse-time name from a later runtime pick or vice versa).
+--
+-- Unlike @bytesNew@'s generated handles these names ARE written into
+-- the desugared AST — they render, round-trip, and mangle (only
+-- source mentions mangle), so a module's promoted handles namespace
+-- like every other atom. And like @ACont@'s documented chaos, no
+-- reservation guards them (the @bytesNew@ note: no new lexical class;
+-- @%a@-rendered values must round-trip) — a user atom spelling the
+-- same name races it, ordinary opt-out chaos (§12).
+freshName :: String -> Parser Name
+freshName prefix = do
+  s <- lift St.get
+  lift (St.modify' (\st -> st { psFresh = psFresh st + 1 }))
+  pure (prefix ++ show (psFresh s))
 
 --------------------------------------------------------------------------------
 -- Lexer
@@ -88,8 +126,8 @@ ws :: Parser ()
 ws = hidden (skipMany (plainSpace <|> lineComment))
   where
     plainSpace = do
-      d <- lift St.get
-      if d > (0 :: Int)
+      d <- psDepth <$> lift St.get
+      if d > 0
         then void spaceChar
         else void (char ' ' <|> char '\t' <|> char '\r')
     lineComment = string "--" *> skipMany (noneOf ("\n" :: String))
@@ -176,10 +214,10 @@ stringLit = lexeme $ do
 grouped :: Char -> Char -> Parser a -> Parser a
 grouped open close p = do
   _ <- char open
-  lift (St.modify' (+ (1 :: Int)))
+  lift (St.modify' (\st -> st { psDepth = psDepth st + 1 }))
   ws
   r <- p
-  lift (St.modify' (subtract 1))
+  lift (St.modify' (\st -> st { psDepth = psDepth st - 1 }))
   _ <- char close
   ws
   pure r
@@ -434,30 +472,35 @@ listExpr = grouped '[' ']' $ do
 -- Actions
 --------------------------------------------------------------------------------
 
+-- | A single action parses to a one-action list; @fwrite@ is the one
+-- action that may parse to TWO (its string-literal argument
+-- auto-promotes to a preceding bind, see 'fwriteP'). A bracketed
+-- sequence flattens the per-action lists; promotion inside an @if@
+-- branch works because branches are 'actionListP's.
 actionListP :: Parser [Action]
-actionListP = bracketSeq <|> (:[]) <$> actionP
+actionListP = bracketSeq <|> actionP
   where
-    bracketSeq = grouped '[' ']' (actionP `sepBy` symbolT ";")
+    bracketSeq = grouped '[' ']' (concat <$> (actionP `sepBy` symbolT ";"))
 
-actionP :: Parser Action
+actionP :: Parser [Action]
 actionP = choice
-  [ ifP
-  , lobP
-  , rerouteP
-  , sayfdP
-  , bytesBindP
-  , bytesDestroyP
-  , bytesNewP
-  , importP
+  [ (:[]) <$> ifP
+  , (:[]) <$> lobP
+  , (:[]) <$> rerouteP
+  , (:[]) <$> sayfdP
+  , (:[]) <$> bytesBindP
+  , (:[]) <$> bytesDestroyP
+  , (:[]) <$> bytesNewP
+  , (:[]) <$> importP
   , fileP
-  , sayP
-  , exitP
-  , sleepP
-  , panicP
-  , errorP
-  , rword "die"  *> pure Die
-  , rword "quit" *> pure Die
-  , Out <$> tupleExpr
+  , (:[]) <$> sayP
+  , (:[]) <$> exitP
+  , (:[]) <$> sleepP
+  , (:[]) <$> panicP
+  , (:[]) <$> errorP
+  , rword "die"  *> pure [Die]
+  , rword "quit" *> pure [Die]
+  , (:[]) . Out <$> tupleExpr
   ]
 
 -- | A bag name in action position: usually a capitalized atom as
@@ -573,11 +616,43 @@ fcloseP = rword "fclose" *> (FClose <$> exprP)
 freadP :: Parser Action
 freadP = rword "fread" *> (FRead <$> exprP)
 
-fwriteP :: Parser Action
-fwriteP = rword "fwrite" *> (FWrite <$> exprP <*> exprP)
+fwriteP :: Parser [Action]
+-- | @fwrite H S@ (§13.17) with the issue #18 stretch-goal sugar —
+-- inline auto-promotion (§13.24): a @\"...\"@ literal in the bytestring
+-- position S desugars at parse time to @bytesBind AutoN <codepoints>@
+-- immediately followed by the write — N a 'freshName' (prefix @Auto@).
+-- The promoted pair shares one action list, so the bundle's FIFO drain
+-- orders bind before write and no consumer needs the gate (which is
+-- still emitted — the ordinary @(Bytes, H)@ tuple, an unconsumed
+-- stray in Global like every un-gated bind).
+--
+-- Literal-ONLY: a variable or computed codepoint list in S promotes
+-- nothing — @fwrite H Buf@ still means "write what the handle Buf
+-- names", and promoting any casual-string expression would silently
+-- flip @fwrite H [72, 105]@ from an unknown-handle error to a write
+-- (the §13.23 messageboard note's open question, resolved toward
+-- literal-only; flip-worthy). A char literal @'x'@ does not promote
+-- either (it is a plain Int). The desugared form renders and
+-- round-trips — fixed point: the rendered S is an atom, which does
+-- not re-promote.
+fwriteP = do
+  _ <- rword "fwrite"
+  h <- exprP
+  lit <- optional (try stringLit)
+  case lit of
+    Nothing -> (\s -> [FWrite h s]) <$> exprP
+    Just cs -> do
+      n <- freshName "Auto"
+      let cps = foldr (\c e -> ETuple [EInt (toInteger (ord c)), e]) (EAtom "Nil") cs
+      pure [BytesBind n cps, FWrite h (EAtom n)]
 
-fileP :: Parser Action
-fileP = choice [fopenP, fcloseP, freadP, fwriteP]
+fileP :: Parser [Action]
+fileP = choice
+  [ (:[]) <$> fopenP
+  , (:[]) <$> fcloseP
+  , (:[]) <$> freadP
+  , fwriteP
+  ]
 
 --------------------------------------------------------------------------------
 -- Declarations & program
