@@ -71,6 +71,11 @@ roundTrips src = case parseProgram src of
 str :: String -> Expr
 str = foldr (\c e -> ETuple [EInt (toInteger (ord c)), e]) (EAtom "Nil")
 
+-- | The §11.5 list-literal shape, written explicitly: nested 2-tuples
+-- ending in @Nil@.
+consL :: [Expr] -> Expr
+consL = foldr (\e acc -> ETuple [e, acc]) (EAtom "Nil")
+
 main :: IO ()
 main = hspec $ do
   describe "Lindana.Parser" $ do
@@ -398,6 +403,49 @@ main = hspec $ do
                        FWrite (EAtom "Log_v2") (EAtom "Buf_v2"),
                        FRead (EAtom "Log_v2"),
                        FClose (EAtom "Log_v2")]]
+
+    describe "inline auto-promotion (§9, issue #18 stretch goal, §13.24)" $ do
+      it "promotes a string literal in fwrite's bytestring position to bytesBind + fwrite" $ do
+        p <- parseOk ": fwrite Stdout \"hi\""
+        progDecls p `shouldBe`
+          [Machine [] [ BytesBind "Auto0" (consL [EInt 104, EInt 105])
+                      , FWrite (EAtom "Stdout") (EAtom "Auto0") ]]
+      it "the fresh-name counter is flat and in source order" $ do
+        p <- parseOk (T.pack $ unlines
+          [ ": [fwrite Stdout \"a\"; fwrite Stderr \"b\"]"
+          , "(Go,) : fwrite Stdout \"c\""
+          ])
+        progDecls p `shouldBe`
+          [ Machine [] [ BytesBind "Auto0" (consL [EInt 97])
+                       , FWrite (EAtom "Stdout") (EAtom "Auto0")
+                       , BytesBind "Auto1" (consL [EInt 98])
+                       , FWrite (EAtom "Stderr") (EAtom "Auto1") ]
+          , Machine [PatElem Take (PTuple [PAtom "Go"])]
+                    [ BytesBind "Auto2" (consL [EInt 99])
+                    , FWrite (EAtom "Stdout") (EAtom "Auto2") ] ]
+      it "promotes inside if branches (branches are action lists)" $ do
+        p <- parseOk ": if 1 then fwrite Stdout \"t\" else fwrite Stdout \"e\""
+        progDecls p `shouldBe`
+          [Machine [] [ If (EInt 1)
+                        [ BytesBind "Auto0" (consL [EInt 116])
+                        , FWrite (EAtom "Stdout") (EAtom "Auto0") ]
+                        [ BytesBind "Auto1" (consL [EInt 101])
+                        , FWrite (EAtom "Stdout") (EAtom "Auto1") ] ]]
+      it "a non-literal bytestring position does not promote" $ do
+        p <- parseOk ": [fwrite Stdout Buf; fwrite Stdout [72, 105]]"
+        progDecls p `shouldBe`
+          [Machine [] [ FWrite (EAtom "Stdout") (EAtom "Buf")
+                       , FWrite (EAtom "Stdout") (consL [EInt 72, EInt 105]) ]]
+      it "other string-literal positions do not promote (path stays casual, format stays format)" $ do
+        p <- parseOk ": fopen Log \"p\" W"
+        progDecls p `shouldBe` [Machine [] [FOpen "Log" (str "p") (EAtom "W")]]
+      it "round-trips as the desugared form (fixed point: the rendered atom does not re-promote)" $
+        roundTrips ": fwrite Stdout \"hi\"" `shouldBe` True
+      it "mangles: the promoted handle is an ordinary source atom" $ do
+        p <- parseOk ": fwrite Stdout \"hi\""
+        progDecls (mangleProgram "_v2" p) `shouldBe`
+          [Machine [] [ BytesBind "Auto0_v2" (consL [EInt 104, EInt 105])
+                      , FWrite (EAtom "Stdout_v2") (EAtom "Auto0_v2") ]]
 
     it "parses a no-LHS machine (§1 one-shot): the issue #7 Hello World" $ do
       p <- parseOk $ T.unlines

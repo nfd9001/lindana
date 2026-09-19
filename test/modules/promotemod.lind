@@ -1,0 +1,10 @@
+-- promotemod: the §13.24 module fixture (inline auto-promotion). The
+-- module fwrites a "..." literal through an fd it is handed as DATA
+-- (the fd-as-data pattern, §13.17: a module cannot mention Stdout —
+-- its mention would mangle). The literal promotes to bytesBind Auto0,
+-- an ordinary source atom, which mangles to Auto0_v2 — so a module's
+-- promoted handles namespace like every other atom, and two modules
+-- promoting the same literal cannot collide. Shape of fdwriter.lind.
+Boot {
+  (Go, fd, reply) : [fwrite fd "module-made"; lob reply (Done,)]
+}

@@ -292,6 +292,37 @@ spec = do
       said `shouldBe` ["got 3", "ok", "Ok"]
       rrExit rr `shouldBe` ExitSuccess
 
+  -- §13.24 (issue #18's stretch goal): a "..." literal in fwrite's
+  -- bytestring position promotes — the desugar is bytesBind AutoN +
+  -- fwrite, sharing one action list, so the bundle's FIFO drain lands
+  -- bind before write and no consumer needs the gate.
+  describe "inline auto-promotion e2e (§9, issue #18 stretch goal, §13.24)" $ do
+    it "a literal fwrites as an anonymous bytestring, no gate needed" $ do
+      l <- loadOk $ unlines
+        [ ": [fwrite Stdout \"inline hi\"; say \"\"; exit 0]"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["inline hi"]
+      rrExit rr `shouldBe` ExitSuccess
+    it "several promotions in one bundle write in byte-exact order" $ do
+      l <- loadOk $ unlines
+        [ ": [fwrite Stdout \"a\"; fwrite Stdout \"b\"; fwrite Stdout \"c\"; say \"\"; exit 0]"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["abc"]
+      rrExit rr `shouldBe` ExitSuccess
+    it "promotion composes with the fd verbs: a promoted literal into a file, read back" $ do
+      path <- tmpFdPath
+      l <- loadOk $ unlines
+        [ ": [fopen F \"" ++ path ++ "\" W"
+        , "  ; fwrite F \"from a promoted literal\""
+        , "  ; fclose F; fopen G \"" ++ path ++ "\" R; fread G"
+        , "  ; say \"%b\" G; exit 0]"
+        ]
+      (said, rr) <- runCaptureSay (loadedMachines l) (loadedInitial l)
+      said `shouldBe` ["from a promoted literal"]
+      rrExit rr `shouldBe` ExitSuccess
+
   describe "bytesRead: the identity invariant e2e (§9, issue #12)" $ do
     it "bytesRead of a bind matches the original string literal pattern" $ do
       l <- loadOk $ unlines
@@ -455,3 +486,13 @@ silentHooks = do
     , hookStderr = herr
     , hookPanic  = \_ -> pure ()
     , hookModDir = "." }
+
+-- | A unique scratch file (created empty) for fd e2e tests, left in
+-- the OS temp dir — empty and harmless (the ModuleSpec twin's
+-- sibling).
+tmpFdPath :: IO FilePath
+tmpFdPath = do
+  d <- getTemporaryDirectory
+  (p, h) <- openBinaryTempFile d "lindana-fd-test"
+  hClose h
+  pure p
