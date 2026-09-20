@@ -1392,3 +1392,69 @@ in `Global` like every un-gated bind).
   promotion sites (`import "mod" "" []`). Unchanged carries: the
   §11.7 runner-scope flip (sleepsort acceptance test), unified error
   routing (§3.3/§7.3), append mode (`A`).
+
+### 13.25 Done — import-position promotion (§9, §13.24's Next), branch `parser/import-promotion`
+
+Closes §13.24's second Next item: the inline auto-promotion sugar now
+covers `import`'s two bytestring positions — `import "greeter" "_v2"
+[]` desugars at parse time to `bytesBind Auto0 <"greeter">;
+bytesBind Auto1 <"_v2">; import Auto0 Auto1 []`. The promotion story
+is thereby complete for both content paths (writes and module loads);
+`bytesBind`-handle-as-expression (§13.23's carry) remains the one
+open content path.
+
+- **Shared helper** (Parser.hs): the §13.24 desugar is factored into
+  `bytePos` — parse one bytestring position (literal → `freshName`
+  `Auto` bind prepended; else the expression as-is) — with `fwriteP`
+  and `importP` as its two consumers. `importP` becomes the second
+  action parser returning a list (`import` promotes to up to two
+  binds + the import, one bind per literal position, in source
+  order); the counter is flat and shared with `fwrite`'s — numbering
+  is global source order across both verbs.
+- **The hide list promotes nothing** (call re-made here, resolved the
+  same way): it is a list-of-atoms position, not a bytestring
+  position — `import Mod Sfx [Boot]` is untouched, and a string
+  literal in the hide position keeps the §9 sugar's existing meaning
+  (a codepoint list; a type error at the effect).
+- **The gate carries the anonymous handle** (documented, not
+  guarded): `(Imported, H, suffix)` has always carried `H` as
+  written; with promotion that is `Auto<n>` — not a name the consumer
+  can spell portably. The portable gate is the suffix (the effective
+  suffix string, data); guidance: give a promoted import a
+  distinctive suffix, since two promoted imports with `""` are
+  indistinguishable from each other and from the prelude's
+  `(Imported, Prelude, "")`. REFERENCE §10/§14 updated in-PR.
+- **No runtime change** (and none needed — checked, not assumed):
+  same-bundle bind→import predates the sugar (`test/modules/outer.lind`
+  does exactly it, §13.13); the §13.24 FIFO argument (bind lands
+  before use) holds for the import effect's effect-time side-table
+  read as it holds for fwrite's. A module's promoted import mangles
+  normally — `Auto<n>` + suffix, binds and references stay consistent
+  (e2e with `test/modules/importprom.lind`, the outer/inner shape).
+- **Messageboard**:
+  `agent-history/messageboard/provisional-import-promotion.txt` —
+  four calls (hide list promotes nothing, gate carries the anonymous
+  handle, same-bundle bind→import pre-dates the sugar, module
+  mangling e2e).
+- **Verification**: 241 tests green (8 new: 6 parser — both-position
+  promotion shape, flat counter shared with fwrite, one-position-only,
+  hide list untouched, round-trip fixed point, mangling; 2 ModuleSpec
+  e2e — a promoted top-level import with suffix-gated consumer, and a
+  module's promoted import of another module through mangling),
+  randomized order, 3× repeat stable, zero `-Wall` warnings (clean
+  rebuild). New `examples/importpromote.lind` verified via CLI (exit
+  0), `--parse` round-trip (fixed point; the rendered form also runs,
+  exit 0), and gated on the distinctive-suffix guidance it
+  demonstrates. All pre-existing examples re-verified (parser
+  changed): outputs/exit codes byte-identical to `main` (the three
+  non-standalone demos still exit 1; the only diff against main's
+  capture is the new example itself, which on main errors with the
+  pre-promotion unknown-handle type error — the flip §13.24's
+  literal-only call predicted); every example's `--parse` render
+  re-parses to a fixed point.
+- **Next**: `bytesBind`'s handle position as an expression
+  (handles-as-data for binds; §13.23's carry) — with both promotion
+  sites landed, this is the remaining content path, and the one that
+  lets a runtime `bytesNew` handle be re-bound via the gate.
+  Unchanged carries: the §11.7 runner-scope flip (sleepsort acceptance
+  test), unified error routing (§3.3/§7.3), append mode (`A`).
