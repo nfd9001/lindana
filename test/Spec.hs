@@ -447,6 +447,46 @@ main = hspec $ do
           [Machine [] [ BytesBind "Auto0_v2" (consL [EInt 104, EInt 105])
                       , FWrite (EAtom "Stdout_v2") (EAtom "Auto0_v2") ]]
 
+    describe "import-position promotion (§9, §13.25)" $ do
+      it "promotes literals in both bytestring positions to binds + import" $ do
+        p <- parseOk ": import \"greeter\" \"_v2\" []"
+        progDecls p `shouldBe`
+          [Machine [] [ BytesBind "Auto0" (str "greeter")
+                      , BytesBind "Auto1" (str "_v2")
+                      , Import (EAtom "Auto0") (EAtom "Auto1") (EAtom "Nil") ]]
+      it "the counter is shared with fwrite's — flat, in source order" $ do
+        p <- parseOk (T.pack $ unlines
+          [ ": [fwrite Stdout \"a\"; import \"m\" \"\" []]"
+          , "(Go,) : import M S []"
+          ])
+        progDecls p `shouldBe`
+          [ Machine [] [ BytesBind "Auto0" (consL [EInt 97])
+                       , FWrite (EAtom "Stdout") (EAtom "Auto0")
+                       , BytesBind "Auto1" (str "m")
+                       , BytesBind "Auto2" (EAtom "Nil")
+                       , Import (EAtom "Auto1") (EAtom "Auto2") (EAtom "Nil") ]
+          , Machine [PatElem Take (PTuple [PAtom "Go"])]
+                    [Import (EAtom "M") (EAtom "S") (EAtom "Nil")] ]
+      it "promotes one position only when the other is not a literal" $ do
+        p <- parseOk ": [import Mod \"_v2\" []; import \"greeter\" Sfx []]"
+        progDecls p `shouldBe`
+          [Machine [] [ BytesBind "Auto0" (str "_v2")
+                       , Import (EAtom "Mod") (EAtom "Auto0") (EAtom "Nil")
+                       , BytesBind "Auto1" (str "greeter")
+                       , Import (EAtom "Auto1") (EAtom "Sfx") (EAtom "Nil") ]]
+      it "the hide-list position never promotes (it names atoms, not bytes)" $ do
+        p <- parseOk ": import Mod Sfx [Boot]"
+        progDecls p `shouldBe`
+          [Machine [] [Import (EAtom "Mod") (EAtom "Sfx") (consL [EAtom "Boot"])]]
+      it "round-trips as the desugared form (fixed point)" $
+        roundTrips ": import \"greeter\" \"_v2\" []" `shouldBe` True
+      it "mangles: a module's promoted import handles namespace like every atom" $ do
+        p <- parseOk ": import \"greeter\" \"_v2\" []"
+        progDecls (mangleProgram "_v2" p) `shouldBe`
+          [Machine [] [ BytesBind "Auto0_v2" (str "greeter")
+                      , BytesBind "Auto1_v2" (str "_v2")
+                      , Import (EAtom "Auto0_v2") (EAtom "Auto1_v2") (EAtom "Nil") ]]
+
     it "parses a no-LHS machine (§1 one-shot): the issue #7 Hello World" $ do
       p <- parseOk $ T.unlines
         [ ": [say \"Hello world!\"; (Stop, 0)]"

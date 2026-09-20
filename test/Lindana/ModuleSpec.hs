@@ -347,6 +347,40 @@ spec = describe "module import (§13.13, issue #17)" $ do
     panics `shouldBe` []
     rrExit rr `shouldBe` ExitSuccess
 
+  -- §13.25: import-position promotion. A top-level program can spell
+  -- the whole import as literals — both "..." positions desugar to
+  -- bytesBind AutoN + import, no manual bind dance. The gate's suffix
+  -- is the module name's CONTENTS' effective suffix (data), so the
+  -- consumer gates on a distinctive suffix — "" would be
+  -- indistinguishable from the prelude's (Imported, Prelude, "")
+  -- tuple (and the gate's handle is the anonymous Auto atom, a
+  -- compiler-generated name the consumer does not spell).
+  it "a promoted import loads a module; the consumer gates on the suffix (§13.25)" $ do
+    (said, panics, rr) <- runMain $ unlines
+      [ ": import \"echo\" \"_v2\" []"
+      , "(Imported, nh, \"_v2\") : (Echo_v2, \"hi\", Reply)"
+      , "Reply { (Echoed_v2, m) : [say \"got %s\" m; exit 0] }"
+      ]
+    said `shouldBe` ["got hi"]
+    panics `shouldBe` []
+    rrExit rr `shouldBe` ExitSuccess
+
+  -- §13.25: a module's own import promotes too — its Auto atoms mangle
+  -- with the module's suffix (importprom imports with ambient suffix
+  -- _v2, so Auto0_v2/Auto1_v2), the promoted binds land under the
+  -- mangled names, and the import reads them back consistently.
+  -- Shape of the §13.13 outer/inner recursion test.
+  it "a module's import promotes its literals; the handles mangle (§13.25)" $ do
+    (said, panics, rr) <- runMain $ unlines $
+      preamble "importprom" "_v2" ++
+      [ importLine
+      , "(Imported, Mod, \"_v2\") : (Go_v2, Reply)"
+      , "Reply { (InnerHi_v2,) : [say \"inner via promoted import\"; exit 0] }"
+      ]
+    said `shouldBe` ["inner via promoted import"]
+    panics `shouldBe` []
+    rrExit rr `shouldBe` ExitSuccess
+
   -- §11.12: quiet's only machine is a one-shot that dies, and it
   -- declares no Error block — so the import installs the module's
   -- default Error machine, which is idle-exempt and must not keep

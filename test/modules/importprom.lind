@@ -1,0 +1,11 @@
+-- importprom: the §13.25 module fixture (import-position promotion).
+-- The module imports inner with BOTH bytestring positions promoted:
+-- its "..." literals desugar at parse time to bytesBind AutoN +
+-- import — the Auto atoms are ordinary source atoms and mangle with
+-- the module's suffix (Auto0_v2, …), so the promoted binds and the
+-- import's references to them stay consistent within the module, and
+-- two modules promoting the same literal cannot collide. Shape of
+-- outer.lind (which does the same load with an explicit handle).
+: import "inner" "" []
+
+(Go, reply) : lob reply (InnerHi,)
