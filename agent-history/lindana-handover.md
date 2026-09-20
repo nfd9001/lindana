@@ -1319,3 +1319,76 @@ consumer grabs it from the gate and passes it around like any handle
   can be re-bound, the one content path `bytesNew` does not open.
   Unchanged carries: the §11.7 runner-scope flip (sleepsort
   acceptance test), unified error routing (§3.3/§7.3), append mode.
+
+### 13.24 Done — inline auto-promotion sugar (§9, issue #18's stretch goal), branch `parser/inline-promotion`
+
+Closes the follow-up §13.23 left open: a `"..."` literal in `fwrite`'s
+bytestring position promotes to an anonymous bytestring — `fwrite
+Stdout "hi"` desugars at parse time to `bytesBind Auto0 (104, (105,
+Nil)); fwrite Stdout Auto0`. Pure parser sugar: no AST nodes, no new
+actions, no runtime changes (the promoted pair shares one action list,
+so the effect bundle's FIFO drain lands bind before write and no
+consumer needs the gate — which is still emitted, an unconsumed stray
+in `Global` like every un-gated bind).
+
+- **Parse-time fresh names as scaffolding** (Syntax unchanged,
+  Parser.hs): the parser's bracket-depth `Int` state became a `PState`
+  record with a second field, and 'freshName' is the flat
+  counter — `prefix0`, `prefix1`, …, numbered in source order. The
+  `ACont` precedent, generalized: any future desugar needing
+  compiler-generated atoms shares the helper. Notably the §5
+  Terse→Restricted desugaring remains unimplemented (action lists
+  interpret directly today; `AContN` survives as a naming precedent
+  and as the cross-invocation chaos concept) — a future pass would
+  reuse 'freshName' with its own prefix.
+- **Prefix `Auto`** — deliberately NOT `Bytes<n>`: that namespace
+  belongs to `bytesNew`'s runtime counter (`rtsFresh`), and two
+  counters sharing a namespace could not be saved by the runtime skip
+  (a parse-time `Bytes0` and a runtime `Bytes0` pick are unordered
+  across bundles). Two counters, two namespaces, no cross-talk.
+  Flip-worthy.
+- **Promoted names are ordinary source atoms** — unlike `bytesNew`'s
+  handles (never written in any source, never mangle), `Auto<n>` IS in
+  the desugared AST: it renders, round-trips (fixed point — the
+  rendered `fwrite` S is an atom and does not re-promote), and mangles
+  (only source mentions mangle). A module's promoted handles therefore
+  namespace like everything else; two modules promoting the same
+  literal cannot collide (module e2e with `test/modules/promotemod.lind`,
+  fd-as-data since a module cannot mention `Stdout`).
+- **Literal-only promotion** (the §13.23 messageboard note's open
+  question, resolved): a variable or computed codepoint list in S
+  promotes nothing — `fwrite H Buf` and `fwrite H [72, 105]` keep
+  meaning "write what the handle names / the unknown-handle error
+  they are". Promotion of any casual-string expression would silently
+  have flipped the latter to a write. Flip-worthy (a future
+  `bytesBind`-handle-as-expression slice is the explicit way to the
+  same convenience).
+- **No reservation, no interning**: nothing stops a user atom spelling
+  `Auto0` (the `bytesNew` note 6 reasoning: no new lexical class,
+  `%a`-rendered values must round-trip) — racing it is ordinary
+  opt-out chaos (§12). And two promotions of the same literal create
+  two entries (no interning) — wasteful but correct, same lifetime
+  story as any side-table entry (§11.11 reclamation still punted).
+- **Verification**: 233 tests green (11 new: 7 parser — promotion
+  shape, flat counter across machines, inside-`if` branches,
+  non-literal non-promotion, other string positions untouched,
+  round-trip fixed point, mangling; 3 LoaderSpec e2e — single write,
+  multi-write bundle order, promotion composed with fopen/fread; 1
+  module e2e), randomized order, 3× repeat stable, zero `-Wall`
+  warnings. `examples/promote.lind` verified via CLI (exit 0; Stdout
+  lines + the file written) and `--parse` round-trip (fixed point; the
+  rendered form also runs, exit 0). All pre-existing examples
+  re-verified (parser changed: same outputs/exit codes, the three
+  non-standalone demos still exit 1; every example's `--parse` render
+  re-parses to a fixed point).
+- **Messageboard**: `agent-history/messageboard/provisional-inline-promotion.txt`
+  — six flip-worthy calls (literal-only, the `Auto` prefix, desugar
+  shape + stray gate, source-atom mangling, no interning, no
+  reservation).
+- **Next**: `bytesBind`'s handle position could become an expression
+  (handles-as-data for binds; §13.23's carry) — with promotion landed,
+  `fwrite H Buf` plus a runtime handle still needs it for re-binding
+  `bytesNew` handles; `import`'s handle positions are the natural next
+  promotion sites (`import "mod" "" []`). Unchanged carries: the
+  §11.7 runner-scope flip (sleepsort acceptance test), unified error
+  routing (§3.3/§7.3), append mode (`A`).

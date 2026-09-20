@@ -1,0 +1,12 @@
+-- promote.lind — inline auto-promotion sugar (§13.24, issue #18's
+-- stretch goal): a "..." literal in fwrite's bytestring position
+-- desugars at parse time to bytesBind AutoN + fwrite — an anonymous
+-- bytestring, no handle to declare and no gate to wait on. The
+-- desugared form is what --parse renders (bytesBind Auto0 (104, …)).
+-- Standalone: run with `lindana examples/promote.lind`, exit 0.
+: [ fopen Log "promote.out" W
+  ; fwrite Stdout "inline: promoted, no handle declared\n"
+  ; fwrite Log "file: promoted through a passed path\n"
+  ; fclose Log
+  ; fwrite Stdout "done\n"
+  ; exit 0 ]

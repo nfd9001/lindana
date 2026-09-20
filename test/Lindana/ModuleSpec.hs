@@ -324,6 +324,29 @@ spec = describe "module import (§13.13, issue #17)" $ do
     panics `shouldBe` []
     rrExit rr `shouldBe` ExitSuccess
 
+  -- §13.24 (issue #18's stretch goal): a module auto-promotes a
+  -- "..." literal. The module fwrites through an fd it is handed as
+  -- data (fdwriter pattern — a module cannot mention Stdout); its
+  -- literal promotes to bytesBind Auto0, an ordinary source atom that
+  -- mangles to Auto0_v2, namespaced like everything else (and distinct
+  -- from main's own Auto0 below — the two coexist). Same-bundle FIFO
+  -- lands the promoted bind before its write; the gate is an unconsumed
+  -- stray in Global.
+  it "a module auto-promotes a literal; the promoted handle mangles (§13.24)" $ do
+    path <- tmpFdPath
+    (said, panics, rr) <- runMain $ unlines $
+      preamble "promotemod" "_v2" ++
+      [ importLine
+      , ": fopen F \"" ++ path ++ "\" W"
+      , "(Fopen, F), (Imported, Mod, \"_v2\") :"
+      , "  [fwrite Stdout \"main-made\"; say \"\"; lob Boot_v2 (Go_v2, F, Reply)]"
+      , "Reply { (Done_v2,) : [fclose F; fopen G \"" ++ path ++ "\" R; fread G; (Read,)]"
+      , "        (Read,) : [say \"%b\" G; exit 0] }"
+      ]
+    said `shouldBe` ["main-made", "module-made"]
+    panics `shouldBe` []
+    rrExit rr `shouldBe` ExitSuccess
+
   -- §11.12: quiet's only machine is a one-shot that dies, and it
   -- declares no Error block — so the import installs the module's
   -- default Error machine, which is idle-exempt and must not keep
