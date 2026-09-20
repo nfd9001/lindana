@@ -30,13 +30,16 @@
 -- 'String' is @say@'s format: that position is not an expression, the
 -- action consumes the literal as a format.
 --
--- Inline auto-promotion (§9, issue #18's stretch goal, §13.24) adds
--- one more parse-time desugar on the same principle: a @\"...\"@ literal
--- in @fwrite@'s bytestring position promotes to an explicit
--- @bytesBind@ of a parse-time-fresh atom ('freshName' — the flat
--- @ACont@-precedent counter, scaffolding any future desugar that
--- needs generated names). No AST node; the desugared form renders and
--- round-trips.
+-- Inline auto-promotion (§9, issue #18's stretch goal, §13.24/§13.25)
+-- adds one more parse-time desugar on the same principle: a @\"...\"@
+-- literal in a bytestring position (an expression that must evaluate
+-- to a side-table handle atom) promotes to an explicit @bytesBind@ of
+-- a parse-time-fresh atom ('freshName' — the flat @ACont@-precedent
+-- counter, scaffolding any future desugar that needs generated
+-- names). The bytestring positions are @fwrite@'s S and @import@'s H
+-- and S (the hide list is a codepoint-list position, not a bytestring
+-- position — it promotes nothing). No AST node; the desugared form
+-- renders and round-trips.
 module Lindana.Parser
   ( parseProgram
   , PError
@@ -472,11 +475,12 @@ listExpr = grouped '[' ']' $ do
 -- Actions
 --------------------------------------------------------------------------------
 
--- | A single action parses to a one-action list; @fwrite@ is the one
--- action that may parse to TWO (its string-literal argument
--- auto-promotes to a preceding bind, see 'fwriteP'). A bracketed
--- sequence flattens the per-action lists; promotion inside an @if@
--- branch works because branches are 'actionListP's.
+-- | A single action parses to a one-action list; @fwrite@ and
+-- @import@ are the actions that may parse to TWO (a string-literal
+-- bytestring position auto-promotes to a preceding bind — see
+-- 'bytePos'). A bracketed sequence flattens the per-action lists;
+-- promotion inside an @if@ branch works because branches are
+-- 'actionListP's.
 actionListP :: Parser [Action]
 actionListP = bracketSeq <|> actionP
   where
@@ -491,7 +495,7 @@ actionP = choice
   , (:[]) <$> bytesBindP
   , (:[]) <$> bytesDestroyP
   , (:[]) <$> bytesNewP
-  , (:[]) <$> importP
+  , importP
   , fileP
   , (:[]) <$> sayP
   , (:[]) <$> exitP
@@ -596,9 +600,25 @@ bytesNewP = rword "bytesNew" *> (BytesNew <$> exprP)
 -- (a cons-list of atoms; @[]@ for none). The handles' /contents/ are
 -- looked up in the bytestring side-table by the effect runner, so
 -- module names are runtime data.
-
-importP :: Parser Action
-importP = rword "import" *> (Import <$> exprP <*> exprP <*> exprP)
+--
+-- §13.25: H and S are bytestring positions ('bytePos'), so a
+-- @\"...\"@ literal in either auto-promotes — @import \"greeter\" \"\"
+-- []@ desugars to @bytesBind AutoN <\"greeter\">; bytesBind AutoM
+-- <\"\">; import AutoN AutoM []@ — the fwrite precedent, no manual
+-- handle+bind dance for a fixed module name. The hide list is a
+-- codepoint-list position (it names atoms to hide, not bytes) and
+-- promotes nothing. The @(Imported, H, suffix)@ completion tuple
+-- carries the handle /as written/ in the import action — with
+-- promotion that is the fresh @Auto@ atom, not the literal's text
+-- (the gate's documented hazard, one hazard thicker: two promoted
+-- imports are indistinguishable in the gate by construction).
+importP :: Parser [Action]
+importP = do
+  _ <- rword "import"
+  (ph, nh) <- bytePos
+  (ps, sh) <- bytePos
+  hide <- exprP
+  pure (ph ++ ps ++ [Import nh sh hide])
 
 -- | Issue #18 (§13.17): the file-descriptor verbs. @fopen H Path Mode@
 -- declares a handle — a capitalized atom, compile-time-chosen and
@@ -616,35 +636,49 @@ fcloseP = rword "fclose" *> (FClose <$> exprP)
 freadP :: Parser Action
 freadP = rword "fread" *> (FRead <$> exprP)
 
-fwriteP :: Parser [Action]
+-- | §13.24/§13.25: one bytestring position — an expression that must
+-- evaluate to a side-table handle atom — with the inline auto-promotion
+-- sugar: a @\"...\"@ literal here promotes to a 'freshName' @Auto@ bind.
+-- Returns the promoted bind (if any) and the expression to use in its
+-- place. The consumer splices the bind BEFORE its own action (the
+-- bundle's FIFO drain then lands bind before use, and no consumer
+-- needs the gate — which is still emitted, an unconsumed stray in
+-- Global like every un-gated bind).
+--
+-- Literal-ONLY (the §13.23 messageboard note's open question, resolved
+-- toward literal-only; flip-worthy): a variable or computed codepoint
+-- list promotes nothing — promoting any casual-string expression would
+-- silently flip its existing meaning (for @fwrite@: @fwrite H [72,
+-- 105]@ is an unknown-handle error, not a write; for @import@:
+-- computed handles keep meaning \"resolve these handles\"). A char
+-- literal @'x'@ does not promote either (it is a plain Int). The
+-- desugared form renders and round-trips — fixed point: the rendered
+-- position is an atom, which does not re-promote.
+bytePos :: Parser ([Action], Expr)
+bytePos = do
+  lit <- optional (try stringLit)
+  case lit of
+    Nothing -> (\e -> ([], e)) <$> exprP
+    Just cs -> do
+      n <- freshName "Auto"
+      pure ([BytesBind n (codepointList cs)], EAtom n)
+
+-- | A casual string literal's codepoint cons-list — the exact shape
+-- the §9 string sugar builds.
+codepointList :: String -> Expr
+codepointList = foldr (\c e -> ETuple [EInt (toInteger (ord c)), e]) (EAtom "Nil")
+
 -- | @fwrite H S@ (§13.17) with the issue #18 stretch-goal sugar —
 -- inline auto-promotion (§13.24): a @\"...\"@ literal in the bytestring
 -- position S desugars at parse time to @bytesBind AutoN <codepoints>@
--- immediately followed by the write — N a 'freshName' (prefix @Auto@).
--- The promoted pair shares one action list, so the bundle's FIFO drain
--- orders bind before write and no consumer needs the gate (which is
--- still emitted — the ordinary @(Bytes, H)@ tuple, an unconsumed
--- stray in Global like every un-gated bind).
---
--- Literal-ONLY: a variable or computed codepoint list in S promotes
--- nothing — @fwrite H Buf@ still means "write what the handle Buf
--- names", and promoting any casual-string expression would silently
--- flip @fwrite H [72, 105]@ from an unknown-handle error to a write
--- (the §13.23 messageboard note's open question, resolved toward
--- literal-only; flip-worthy). A char literal @'x'@ does not promote
--- either (it is a plain Int). The desugared form renders and
--- round-trips — fixed point: the rendered S is an atom, which does
--- not re-promote.
+-- immediately followed by the write — N a 'freshName' (prefix @Auto@,
+-- via 'bytePos').
+fwriteP :: Parser [Action]
 fwriteP = do
   _ <- rword "fwrite"
   h <- exprP
-  lit <- optional (try stringLit)
-  case lit of
-    Nothing -> (\s -> [FWrite h s]) <$> exprP
-    Just cs -> do
-      n <- freshName "Auto"
-      let cps = foldr (\c e -> ETuple [EInt (toInteger (ord c)), e]) (EAtom "Nil") cs
-      pure [BytesBind n cps, FWrite h (EAtom n)]
+  (pre, s) <- bytePos
+  pure (pre ++ [FWrite h s])
 
 fileP :: Parser [Action]
 fileP = choice

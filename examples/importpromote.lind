@@ -1,0 +1,17 @@
+-- importpromote.lind — import-position promotion (§13.25): both
+-- bytestring positions of `import` take "..." literals. Each desugars
+-- at parse time to bytesBind AutoN + import —
+--   bytesBind Auto0 (103, ...); bytesBind Auto1 (95, ...);
+--   import Auto0 Auto1 []
+-- the fwrite-promotion precedent (§13.24), no manual handle+bind
+-- dance. The desugared form is what `--parse` renders (fixed point).
+-- The (Imported, H, suffix) completion tuple carries the handle AS
+-- WRITTEN — the anonymous Auto0 — so the consumer gates on a
+-- distinctive suffix: "" would be indistinguishable from the prelude's
+-- (Imported, Prelude, "") tuple. Standalone: run with
+-- `lindana examples/importpromote.lind`, exit 0.
+: import "greeter" "_v2" []
+(Imported, nh, "_v2") : (Greet_v2, "world", Outbox)
+Outbox {
+  (Hello_v2, who) : [say "promoted import says: hello, %s" who; exit 0]
+}

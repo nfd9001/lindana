@@ -1,0 +1,52 @@
+provisional import-position promotion (§13.25, branch parser/import-promotion)
+==============================================================================
+
+PR #40's first "Next" follow-up: the inline auto-promotion sugar
+(§13.24) now covers `import`'s two bytestring positions. `import
+"greeter" "_v2" []` desugars at parse time to
+`[bytesBind Auto0 <"greeter">; bytesBind Auto1 <"_v2">; import Auto0
+Auto1 []]`. Same mechanism, no new calls on top of the §13.24 note
+for the sugar itself (literal-only, `Auto` prefix, prepend-to-one-
+action-list, source-atom mangling, no interning, no reservation — all
+carry over verbatim; the helper is now shared, 'bytePos'). Four calls
+new here, all provisional / flip-worthy:
+
+1. THE HIDE-LIST POSITION PROMOTES NOTHING. It is a list-of-atoms
+   position (it names module bags to skip), not a bytestring position
+   — a `"..."` literal there is a codepoint list (the §9 sugar's
+   existing meaning: a type error at the effect, since the hide list
+   decodes atoms). Only H and S promote. Flip path if the hide list
+   ever takes a bytestring: same sugar, own prefix.
+
+2. THE GATE CARRIES THE ANONYMOUS HANDLE. `(Imported, H, suffix)`
+   has always carried `H` as written in the import action; with
+   promotion that is `Auto<n>` — a compiler-generated name the
+   consumer does not (and cannot portably) spell. The consumer's
+   portable gate is the SUFFIX (data: the effective suffix string) —
+   so give a promoted import a distinctive suffix. Documented wrinkle,
+   not guarded: two promoted imports with suffix `""` are
+   indistinguishable from each other AND from the prelude's
+   `(Imported, Prelude, "")` tuple; a gate `(Imported, nh, "")`
+   races whichever import lands first. Alternative considered —
+   emitting the module name's CONTENT in the gate — rejected: the
+   gate convention carries handles, and changing the tuple shape for
+   promoted imports alone would fork the convention.
+
+3. SAME-BUNDLE BIND→IMPORT IS THE ONE CONTENT PATH THAT PRE-DATES
+   THE SUGAR (found while smoke-testing, not a §13.25 change): the
+   sugar's desugar shape — bind and import in one action list —
+   already worked before this branch (test/modules/outer.lind's
+   one-shot does exactly it, §13.13). No runtime change was needed;
+   the §13.24 FIFO argument (bind lands before use) holds for the
+   import effect's effect-time side-table read the same way it holds
+   for fwrite's. Recorded only because §13.24's note described the
+   argument for writes; it is the same argument for imports.
+
+4. PROMOTED IMPORTS IN MODULES MANGLE NORMALLY (tested e2e,
+   test/modules/importprom.lind): the module's `Auto<n>` atoms mangle
+   with its own suffix (Auto0_v2, …), the promoted binds land under
+   the mangled names, and the import's references to them read back
+   consistently — so a module importing another module by literal
+   name works without any manual handle dance, and two modules
+   promoting the same literal still cannot collide (the §13.24 note
+   4 consequence, now for imports).

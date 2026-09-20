@@ -150,7 +150,7 @@ pattern : [action; action; action]
 | `bytesBind` | `bytesBind H [72, 105]` | Register UTF-8 bytes of the codepoint list under atom handle `H`; emits gate tuple (§14). |
 | `bytesDestroy` | `bytesDestroy H` | Drop the bytestring entry. Manual lifetime — no GC. |
 | `bytesNew` | `bytesNew "hi"` | Register the casual string's UTF-8 bytes under a runtime-fresh handle (`Bytes0`, `Bytes1`, …, skipping taken names) and emit the ordinary `(Bytes, H)` gate — `H` the fresh handle, grabbed from the gate and used as data. |
-| `import` | `import H S []` | Load a module at runtime (§10). |
+| `import` | `import H S []` | Load a module at runtime (§10). A `"..."` literal in `H` or `S` auto-promotes (§11). |
 | `reroute` | `reroute Src Tgt` | Repoint where `error` tuples from bag `Src` go (§9). Last update wins. |
 | `fopen` | `fopen H "path.txt" W` | Open a file into fd handle `H` (§13). Mode is the atom `R` or `W` (`W` truncates). |
 | `fclose` | `fclose H` | Close a file handle (idempotent; unknown handle is a no-op). |
@@ -258,9 +258,14 @@ truthy, including `()` and `Nil`.
   name the real `Global` or the real top-level `Error` — it talks to
   whatever bags the caller passes as data.
 - On success the loader emits the gate tuple `(Imported, H, S)` into
-  `Global`, spawns the module's machines, and outs its initial tuples.
-  Repeat imports of the same (name, suffix) pair are singletons: skipped,
-  but the gate tuple is still emitted.
+  `Global` — `H` the handle /as written in the import action/, `S` the
+  effective suffix as a casual string. With a promoted import the gate
+  carries the anonymous `Auto<n>` handle (a compiler-generated name
+  the consumer does not spell) and the suffix it bound — so gate on a
+  distinctive suffix; two promoted imports with suffix `""` are
+  indistinguishable from each other and from the prelude's
+  `(Imported, Prelude, "")`. Repeat imports of the same (name, suffix)
+  pair are singletons: skipped, but the gate tuple is still emitted.
 - Import failure (missing file, parse error, load error) is contained:
   panic + exit 1.
 
@@ -291,20 +296,24 @@ Two bytestrings are preregistered at start: `Nil → ""` (the empty-suffix
 spelling) and, via the Prelude, `Prelude → "Prelude"`. Neither is
 special: both can be clobbered or destroyed like any entry.
 
-**Inline auto-promotion**: a `"..."` literal in `fwrite`'s bytestring
-position promotes to an anonymous bytestring — `fwrite Stdout "hi"`
-desugars at parse time to `bytesBind Auto0 (…); fwrite Stdout Auto0`.
-The promoted names are a flat parse-time counter (`Auto0`, `Auto1`, …,
-the `ACont`-precedent scaffolding — a different counter and namespace
-from `bytesNew`'s runtime `Bytes<n>`), ordinary source atoms: they
-render, round-trip, and mangle, so a module's promoted handles
-namespace like everything else. Promotion is literal-only — a variable
-or computed codepoint list promotes nothing (`fwrite H [72, 105]` is
-still an unknown-handle error). The promoted pair shares one action
-list, so the effect bundle lands bind-before-write and no consumer
-needs the gate (it is still emitted, and sits in `Global` like every
-un-gated bind). No name reservation: a user atom spelling `Auto0` races
-it — ordinary opt-out chaos.
+**Inline auto-promotion**: a `"..."` literal in a bytestring position
+— `fwrite`'s `S`, and `import`'s `H` and `S` (`import "greeter"
+"_v2" []`) — promotes to an anonymous bytestring: the literal
+desugars at parse time to `bytesBind Auto0 (…)` immediately followed
+by the action (for `import`, one bind per promoted position, in
+source order). The hide list is a list-of-atoms position and promotes
+nothing. The promoted names are a flat parse-time counter (`Auto0`,
+`Auto1`, …, the `ACont`-precedent scaffolding — a different counter
+and namespace from `bytesNew`'s runtime `Bytes<n>`), ordinary source
+atoms: they render, round-trip, and mangle, so a module's promoted
+handles namespace like everything else. Promotion is literal-only — a
+variable or computed codepoint list promotes nothing (`fwrite H [72,
+105]` is still an unknown-handle error; `import Mod Sfx []` still
+means "resolve these handles"). The promoted binds share one action
+list, so the effect bundle lands bind-before-use and no consumer
+needs the byte gates (they are still emitted, and sit in `Global`
+like every un-gated bind). No name reservation: a user atom spelling
+`Auto0` races it — ordinary opt-out chaos.
 
 ---
 
@@ -358,7 +367,7 @@ consumers `rd`/take them to sequence deterministically:
 | `fopen` | `(Fopen, H)` |
 | `fread` | `(Fread, H)` |
 | `fwrite` | `(Fwrote, H)` |
-| `import` | `(Imported, H, S)` |
+| `import` | `(Imported, H, S)` — `H` as written; a promoted import's `H` is the anonymous `Auto<n>` atom (gate on the suffix) |
 
 The startup one-shot (`bytesBind`, prelude statics) runs before other
 machines in practice, but the guarantee is by convention: gate on the
