@@ -7,6 +7,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently, mapConcurrently_, async, wait)
 import Control.Concurrent.STM (atomically)
 import Control.Exception (evaluate)
+import Data.Char (ord)
 import qualified Data.Map.Strict as Map
 
 import Test.Hspec
@@ -250,6 +251,16 @@ spec = do
     it "splices a bound tuple into a constructed tuple (§4)" $ do
       evalExpr env (ETuple [ESplice (EVar "c"), EBin Add (EVar "a") (EVar "b")])
         `shouldBe` t [atom "Print", VInt 42]
+
+    -- Found by the fuzzing suite's string round-trip property (issue
+    -- #41): D800..DFFF passed the range check and silently became
+    -- U+FFFD at the encodeUtf8 boundary of every consumer. Now an
+    -- honest error (§3.3), pinned here. (sum/map: forcing the spine
+    -- alone would never touch the erroring head — the laziness
+    -- gotcha the fuzzing property hit twice on the way here.)
+    it "a surrogate codepoint is an error, not a silent U+FFFD (issue #41)" $
+      evaluate (sum (map ord (casualString (stringVal "\xD800"))))
+        `shouldThrow` anyErrorCall
 
 -- | Probe one Take pattern against a bag containing exactly @val@:
 -- the workhorse for structural-match tests.

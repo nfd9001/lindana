@@ -280,6 +280,7 @@ Roughly in order of how foundational they are:
 10. **Top-level program grammar**: now that named bags exist, how do multiple `Name { ... }` blocks, `Global`'s implicit initial-tuple literal, and any other bag's initial state compose into one program's file-level syntax? Flagged early, never revisited. **Provisionally resolved** (§13.6, branch `runtime/named-bags-loader`): a `{ … }` initial block belongs to its nearest enclosing bag — top level is `Global`'s; at most one per bag; nothing else nests (a bag block may not contain another bag block, §6 — sharding is internal, §6.3).
 11. **Bytestring reclamation** — explicitly punted for now (§9); revisit if it matters later.
 12. **Default-Error-machine shutdown hazard**: a program that declares no `Error` block (so the §6.4 default `(c!) : panic c` machine is installed), has no `exit` path, and whose machines all terminate via `die` can never shut down cleanly — the default machine is an immortal parked thread, `rtsLive` never reaches 0, and the RTS aborts with `BlockedIndefinitelyOnSTM`, which Main.hs reports as the §1 deadlock message (exit 1) for what should be a clean exit 0. Repro and candidate fixes in `agent-history/messageboard/sleep-experiment/README.txt` (finding 5), discovered during the §13.21 sleep experiment. — **provisionally resolved** (§13.22, branch `runtime/idle-shutdown`): idle-exempt machines (`machIdle`) are not counted in the live total, and the shutdown check drains idle bags before cancelling so the guaranteed panic survives. Flip-worthy if any future machine class needs "parks forever but still gates shutdown".
+13. **`rand`'s default seed, and schedule-chaos knobs** (issue #41): the fixed constant default (`mkStdGen 12345`) is honest reproducibility for a language about races, but an entropy default is the flip-worthy alternative; the seed is now plumbing (`Hooks.hookSeed`, `--seed N|random` — §13.26). The broader fuzzing plan (Tier 1's in-engine chaos knob, Tier 2's program generator + oracles) lives in the issue: micro-yields between match-commit and bundle-push, a shuffled/pooled effect-runner drain, and multi-runner `runLoaded` variants as probes for what the single-runner FIFO actually promises (§11.7).
 
 ---
 
@@ -1458,3 +1459,77 @@ open content path.
   lets a runtime `bytesNew` handle be re-bound via the gate.
   Unchanged carries: the §11.7 runner-scope flip (sleepsort acceptance
   test), unified error routing (§3.3/§7.3), append mode (`A`).
+
+### 13.26 Done — the fuzzing suite, Tier 0 + the seed rider (§11.13, issue #41), branch `fuzz/pure-properties`
+
+Issue #41's recommended first PR: the three Tier-0 pure properties plus the
+seed-configurability rider — an independent `lindana-fuzz` suite whose job is
+to keep trying to reject the theory that the code performs to contract, and
+the knob that makes randomness a CLI/runtime surface instead of a compile-time
+constant.
+
+- **The seed rider** (§11.13): `Hooks` gains `hookSeed :: StdGen`
+  (`defaultHooks` = the historical `mkStdGen 12345` — default behavior
+  unchanged, runs stay reproducible out of the box); `newRTSWith` reads it.
+  The CLI grows `--seed N` and `--seed random` (`System.Random.newStdGen` for
+  entropy; later `--seed` wins, the reroute precedent). Provisional, per
+  §11.13: an entropy default is the flip-worthy alternative.
+- **The fuzzing suite** (`test/fuzz/`, cabal test-suite `lindana-fuzz`): a
+  hand-rolled `System.Random` carrier (`Rand` = StdGen threading; no
+  QuickCheck/Hedgehog dependency — the seed /is/ the replay mechanism, no
+  shrinking in v1, flip-worthy if shrinking earns its keep). Driven by env
+  vars: `LINDANA_FUZZ_SEED` (default: entropy, reported so entropy runs
+  replay) and `LINDANA_FUZZ_ITERS` (default 100 — fast enough for
+  `stack test`; scale up for a soak). First failure reports the property,
+  master seed, iteration, counterexample, and exits 1.
+- **The properties** (all oracles are independent implementations, not
+  re-reads of the code under test):
+  1. `matchPat` vs. a requirement-tree model (`modelPat`/`matchReq` in
+     `Lindana.Fuzz.Spec` — flattened `Req` tree with explicit arity and
+     rest rules, vs. the real matcher's env-threading recursion).
+  2. `matchJoinSTM` vs. `oracleJoin` — the documented §3.4 left-to-right
+     greedy semantics re-derived over indexed availability lists; checks
+     matched values, env, and the leftover bag (in TVar order — the harness
+     preloads reversed, since `outSTM` prepends; the fuzzer's first catch
+     was in its own oracle, not the runtime).
+  3. `casualString`/`stringVal` round-trips over random scalar strings and
+     a full scalar sweep — and surrogates (D800..DFFF) error.
+  4. Parser round-trip on generated ASTs (`genProgram` → `renderProgram` →
+     `parseProgram` → equal).
+  5. Corpus mutation fuzzing: byte-mutated `examples/` + `test/modules/`
+     must parse to a `Left` or a round-tripping `Right` — never crash.
+- **The find**: property 3 caught a real bug on its first runs — the
+  `cpChar` range check accepted D800..DFFF, and a surrogate codepoint
+  silently became U+FFFD at the `encodeUtf8` boundary of every consumer
+  (`say %s` of `[55296, 65]` printed `got \uFFFD A`). Fixed in
+  `Runtime.cpChar`: surrogates are now an honest error (§3.3 — the
+  action's job to check; the say effect's existing `try`+`fdFailed` path
+  makes it a runner-safe fatal, exit 1, not a silent runner death —
+  verified e2e). Lossy U+FFFD-replacement is the recorded flip-worthy
+  alternative. Pinned twice in the main suite (RuntimeSpec unit;
+  MachineSpec say-path e2e). The generator's constraints discovered
+  along the way: `ESplice` only reparses in direct-`tupleExpr` positions
+  (Out/Raise/lob/initial — `parenExpr`'s grouping path drops a spliced
+  element); the `say` format is restricted to what `show`+the escape
+  grammar round-trip; doubles are quarters (the parser has no exponent
+  or signed literals). All recorded in `Lindana.Fuzz.Gen`'s header.
+- **Harness lessons** (the fuzzer ate its own dogfood twice): `evaluate` to
+  WHNF never forces an erroring head (use `sum . map ord`), and a pure
+  `error` can escape `try` via the optimizer — the surrogate probe carries
+  a `NOINLINE` (though the actual escape turned out to be the surrogate
+  leaking into the round-trip list, now excluded from `scalarValues`).
+- **Verification**: both suites green under `stack test` (246 examples, 0
+  failures; all five properties held), randomized order; soaks: 10,000
+  iterations at a pinned seed and 5,000 at entropy, all green; zero
+  `-Wall` warnings (clean rebuild). CLI verified: `--seed 7` reproducible
+  (twice, byte-identical), different from the 12345 default; `--seed
+  random` runs; a bad `--seed` value errors with usage (exit 1).
+- **Next** (issue #41's tiers): Tier 1 — the in-engine chaos knob
+  (seeded micro-yields around match-commit/bundle-push, shuffled-runner
+  probes, a multi-runner `runLoaded` variant for §11.7) plus a seed-sweep
+  harness over the existing examples; Tier 2 — the program generator +
+  the six oracles (conservation, body atomicity, bundle integrity,
+  exit/panic contract, work conservation, registry idempotence); Tier 3
+  (`dejafu`/`io-sim` systematic interleaving) stays deferred pending
+  what the soaks find. Unchanged carries: `bytesBind` handle as
+  expression, unified error routing (§3.3/§7.3), append mode (`A`).

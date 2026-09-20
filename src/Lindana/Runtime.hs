@@ -40,6 +40,7 @@ module Lindana.Runtime
     -- * Matching (STM layer)
   , MatchResult(..)
   , matchJoinSTM
+  , matchPat
     -- * Blocking tuple-space verbs
   , inBag
   , rdBag
@@ -106,9 +107,21 @@ stringVal = foldr (\c t -> VTuple [VInt (toInteger (ord c)), t]) (VAtom "Nil")
 -- Range check lives with the decoder, not the encoder: literals and
 -- sugar-built lists never carry an out-of-range codepoint, but data
 -- that arrived through the bag might.
+--
+-- Surrogates (D800..DFFF) are excluded too: they are not Unicode
+-- scalar values, and before the fuzzing suite (issue #41) caught it,
+-- they passed this range check and then silently became U+FFFD at the
+-- encodeUtf8 boundary of every consumer — @say %s@ of @[55296, 65]@
+-- printed a replacement character for the 55296. Now an honest error
+-- (§3.3: the action's job to check). Provisional, flip-worthy: a
+-- lossy-replacement reading (pass through, let the encoder substitute)
+-- is the alternative; error keeps the codepoint round-trip exact.
 cpChar :: Integer -> Char
-cpChar n | 0 <= n && n <= 0x10FFFF = chr (fromInteger n)
-         | otherwise = error "string: codepoint out of range (0..0x10FFFF, §3.3)"
+cpChar n
+  | 0xD800 <= n && n <= 0xDFFF =
+      error "string: codepoint in surrogate range D800..DFFF (not a Unicode scalar, §3.3)"
+  | 0 <= n && n <= 0x10FFFF = chr (fromInteger n)
+  | otherwise = error "string: codepoint out of range (0..0x10FFFF, §3.3)"
 
 -- | Bindings produced by a successful match.
 type Env = Map.Map Name Val

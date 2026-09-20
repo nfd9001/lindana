@@ -110,8 +110,12 @@
 --     handoff is free: tuples accumulated before the bag had machines
 --     are simply already in the 'TVar' its machines match against,
 --     and no tuple can be lost or double-delivered.
---   * @rand@'s seed is a fixed constant: runs are deterministic —
---     reproducible chaos.
+--   * @rand@'s seed defaults to a fixed constant ('defaultHooks'
+--     carries @mkStdGen 12345@): runs are deterministic by default —
+--     reproducible chaos. The seed is now plumbing ('Hooks.hookSeed',
+--     issue #41): the CLI's @--seed N|--seed random@ and the fuzzing
+--     suite drive it; an entropy default is the flip-worthy alternative
+--     (§11).
 --   * Shutdown is abrupt: once every machine is done or the program
 --     has exited, remaining threads are cancelled. A machine
 --     committing concurrently with shutdown may or may not land its
@@ -186,9 +190,10 @@ data RTS = RTS
   { rtsBag   :: RBag                  -- ^ @Global@'s bag
   , rtsQueue :: TQueue Bundle
   , rtsSeed  :: TVar StdGen           -- ^ @rand@'s state (§8): splitmix
-                                      -- via System.Random; pure + fixed
-                                      -- seed, so evaluable in STM and
-                                      -- runs stay deterministic
+                                      -- via System.Random; pure + seed from
+                                      -- 'Hooks.hookSeed' (fixed by default),
+                                      -- so evaluable in STM and runs stay
+                                      -- deterministic
   , rtsLive  :: TVar Int              -- ^ live machine threads, plus one
                                       -- slot per pending (queued but not
                                       -- yet run) @import@ effect — the
@@ -290,6 +295,16 @@ data Hooks = Hooks
                                    --   CLI sets it to the main file's
                                    --   directory. Provisional home for
                                    --   this knob (flip-worthy).
+  , hookSeed  :: StdGen            -- ^ @rand@'s initial seed (§8, issue
+                                   --   #41): default the historical fixed
+                                   --   constant @mkStdGen 12345@ — runs
+                                   --   stay reproducible out of the box.
+                                   --   The CLI's @--seed N|--seed random@
+                                   --   and the fuzzing suite override;
+                                   --   an entropy default is the
+                                   --   flip-worthy alternative (§11).
+                                   --   Provisional home for this knob
+                                   --   (same precedent as 'hookModDir').
   }
 
 defaultHooks :: Hooks
@@ -299,6 +314,7 @@ defaultHooks = Hooks
   , hookStderr = stderr
   , hookPanic  = hPutStrLn stderr . ("panic: " ++)
   , hookModDir = "."
+  , hookSeed   = mkStdGen 12345
   }
 
 -- | §13.18: the std fd-table names. Ordinary atoms — @fopen@ can
@@ -309,8 +325,9 @@ stdFdIn  = "Stdin"
 stdFdOut = "Stdout"
 stdFdErr = "Stderr"
 
--- | A fresh RTS (fixed @rand@ seed: deterministic runs; the std fds
--- preregistered binary — @say@ and @fwrite@ write UTF-8\/raw bytes).
+-- | A fresh RTS (seed from 'Hooks.hookSeed' — the historical fixed
+-- constant by default: deterministic runs; the std fds preregistered
+-- binary — @say@ and @fwrite@ write UTF-8\/raw bytes).
 newRTS :: IO RTS
 newRTS = newRTSWith defaultHooks
 
@@ -326,7 +343,7 @@ newRTSWith hooks = do
     live  <- newTVar 0
     exit  <- newTVar Nothing
     stop  <- newTVar False
-    seed  <- newTVar (mkStdGen 12345)
+    seed  <- newTVar (hookSeed hooks)
     bags  <- newTVar Map.empty
     -- §13.13 + §13.15: two bytestrings preregistered — Nil → "" (the
     -- free empty import suffix, §13.13) and the prelude's name handle
