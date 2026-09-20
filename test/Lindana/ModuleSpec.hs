@@ -25,6 +25,7 @@ import System.Exit (ExitCode (..))
 import System.IO (hClose, openBinaryTempFile, stderr, stdin)
 import System.Timeout (timeout)
 
+import System.Random (mkStdGen)
 import Test.Hspec
 
 import Lindana.Loader
@@ -52,7 +53,7 @@ runMain src = do
                     , hookStdout = hout
                     , hookStderr = stderr
                     , hookPanic = \s -> modifyIORef' panicRef (s :)
-                    , hookModDir = "test/modules" }
+                    , hookModDir = "test/modules", hookSeed = mkStdGen 12345 }
   mrr <- timeout (10 * 1000000)
            (runLoaded hooks (loadedMachines l) (loadedInitial l))
   rr <- case mrr of

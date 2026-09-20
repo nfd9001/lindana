@@ -17,6 +17,7 @@ import System.IO (hClose, openBinaryTempFile, stderr, stdin)
 import System.Timeout (timeout)
 
 import Data.List (sort)
+import System.Random (mkStdGen)
 import Test.Hspec
 
 import Lindana.Loader
@@ -466,7 +467,7 @@ runCaptureSay ms initial = do
                     , hookStdout = hout
                     , hookStderr = stderr
                     , hookPanic = \_ -> pure ()
-                    , hookModDir = "." }
+                    , hookModDir = ".", hookSeed = mkStdGen 12345 }
   rr <- runLoaded hooks ms initial
   hClose hout
   said <- lines <$> readFile p
@@ -485,7 +486,7 @@ silentHooks = do
     , hookStdout = hout
     , hookStderr = herr
     , hookPanic  = \_ -> pure ()
-    , hookModDir = "." }
+    , hookModDir = ".", hookSeed = mkStdGen 12345 }
 
 -- | A unique scratch file (created empty) for fd e2e tests, left in
 -- the OS temp dir — empty and harmless (the ModuleSpec twin's

@@ -35,6 +35,7 @@ executable lindana
                     , lindana
                     , filepath
                     , megaparsec >=9.0 && <9.3
+                    , random
     default-language: Haskell2010
     ghc-options:      -Wall
 
@@ -56,5 +57,29 @@ test-suite lindana-test
                     , stm
                     , hspec
                     , megaparsec >=9.0 && <9.3
+                    , random
+    default-language: Haskell2010
+    ghc-options:      -Wall
+
+-- The fuzzing suite (issue #41): an independent, seedable harness that
+-- keeps trying to reject the theory that the code performs to
+-- contract. Runs under `stack test` alongside the main suite at a
+-- modest default iteration count; scale up via LINDANA_FUZZ_ITERS and
+-- replay any failure with LINDANA_FUZZ_SEED.
+test-suite lindana-fuzz
+    type:             exitcode-stdio-1.0
+    main-is:          FuzzMain.hs
+    other-modules:    Lindana.Fuzz.Gen
+                      Lindana.Fuzz.Spec
+    hs-source-dirs:   test/fuzz
+    build-depends:    base
+                    , text
+                    , lindana
+                    , containers
+                    , stm
+                    , random
+                    , megaparsec >=9.0 && <9.3
+                    , directory
+                    , filepath
     default-language: Haskell2010
     ghc-options:      -Wall

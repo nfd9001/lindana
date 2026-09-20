@@ -42,6 +42,7 @@
 -- renders and round-trips.
 module Lindana.Parser
   ( parseProgram
+  , reservedWords
   , PError
   ) where
 

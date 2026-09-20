@@ -23,6 +23,7 @@ import System.IO (hClose, openBinaryFile, openBinaryTempFile, stderr, stdin,
 import System.Timeout (timeout)
 import Control.Monad (unless)
 
+import System.Random (mkStdGen)
 import Test.Hspec
 
 import Lindana.Machine
@@ -89,6 +90,7 @@ captureHooks = do
         , hookStderr = stderr
         , hookPanic  = \m -> modifyIORef' panics (m :)
         , hookModDir = "."
+        , hookSeed   = mkStdGen 12345
         }
   closedRef <- newIORef False
   let said = do
@@ -255,6 +257,20 @@ spec = do
              [t [EAtom "Go", int 42, consL [int 104, int 105]]]
       output <- said
       output `shouldBe` ["n is 42, s is hi"]
+
+    -- Found by the fuzzing suite (issue #41): a surrogate codepoint in
+    -- the string used to silently become U+FFFD at the encodeUtf8
+    -- boundary; now the %s decode errors and the say effect fatals
+    -- honestly (the §13.17 runner-safe fatal path).
+    it "say %s of a surrogate codepoint fatals with exit 1 (issue #41)" $ do
+      (hooks, _, panics) <- captureHooks
+      let m = machine (take1 (PTuple [a "Go", v "s"]))
+            [ Say "got %s" [EVar "s"], Die ]
+      r <- runGlobal hooks [m]
+             [t [EAtom "Go", consL [int 55296, int 65]]]
+      rrExit r `shouldBe` ExitFailure 1
+      ps <- readIORef panics
+      concat ps `shouldSatisfy` isInfixOf "surrogate"
 
     it "say %s decodes a casual string, escapes and non-ASCII included (§9)" $ do
       (hooks, said, _) <- captureHooks
@@ -465,6 +481,38 @@ spec = do
       length (rrBag r1) `shouldBe` 1
       all (\n' -> n' >= 0 && n' < 10) rolls `shouldBe` True
       rrBag r2 `shouldBe` rrBag r1
+
+  -- The seed is plumbing now (Hooks.hookSeed, issue #41): same seed,
+  -- same rand sequence; different seed, different sequence. Default
+  -- stays the historical fixed constant.
+  describe "the rand seed knob (hookSeed, issue #41)" $ do
+    let drawLoop = machine (take1 (PTuple [a "Count", v "k"]))
+          [ If (EBin Gt (EVar "k") (int 0))
+               [ Say "%i" [ECall "rand" [int 1000000]]
+               , Out (t [EAtom "Count", EBin Sub (EVar "k") (int 1)]) ]
+               [ Die ] ]
+        draws :: Hooks -> IO [String]
+        draws hooks = do
+          (capture, said, _) <- captureHooks
+          r <- runGlobal (capture { hookSeed = hookSeed hooks }) [drawLoop]
+                 [t [EAtom "Count", int 8]]
+          rrExit r `shouldBe` ExitSuccess
+          said
+    it "same seed, same rand sequence" $ do
+      let hooks = defaultHooks
+      l1 <- draws hooks
+      l2 <- draws hooks
+      l1 `shouldBe` l2
+      length l1 `shouldBe` 8
+    it "different seed, different sequence" $ do
+      let hooks = defaultHooks
+      l1 <- draws (hooks { hookSeed = mkStdGen 1 })
+      l2 <- draws (hooks { hookSeed = mkStdGen 2 })
+      l1 `shouldNotBe` l2
+    it "the default seed is the historical fixed constant (mkStdGen 12345)" $ do
+      l1 <- draws defaultHooks
+      l2 <- draws (defaultHooks { hookSeed = mkStdGen 12345 })
+      l1 `shouldBe` l2
 
     it "rand(2) is not a strict alternator (bounded-range gen)" $ do
       -- Hand-rolled LCG + low-bit sampling alternated 0,1,0,1…;
@@ -932,7 +980,7 @@ spec = do
       (perr, herr) <- openBinaryTempFile d "lindana-say-test"
       let hooks = Hooks { hookStdin = stdin, hookStdout = hout
                         , hookStderr = herr, hookPanic = \_ -> pure ()
-                        , hookModDir = "." }
+                        , hookModDir = ".", hookSeed = mkStdGen 12345 }
           b = machine [] [ BytesBind "E" (str "err!"), Die ]
           m = machine (take1 (PTuple [a "Bytes", a "E"]))
                 [ FWrite (EAtom "Stderr") (EAtom "E"), Exit (int 0) ]
@@ -949,7 +997,7 @@ spec = do
       hin' <- openBinaryFile pin ReadMode
       let hooks = Hooks { hookStdin = hin', hookStdout = hout
                         , hookStderr = stderr, hookPanic = \_ -> pure ()
-                        , hookModDir = "." }
+                        , hookModDir = ".", hookSeed = mkStdGen 12345 }
           -- Three reads through the line-mode fd, each gated on the
           -- previous read's (Fread, Stdin) tuple (the gate exists only
           -- after the read effect ran) plus a counter tuple. The
