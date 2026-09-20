@@ -25,3 +25,8 @@ stack build
 stack test
 stack exec lindana -- examples/hello.lind
 ```
+
+`stack test` also runs `lindana-fuzz` — a property/fuzzing suite that
+sweeps generated inputs and schedules against the runtime's contract
+(issue #41). Pin the seed with `LINDANA_FUZZ_SEED=<n>` and scale it up
+with `LINDANA_FUZZ_ITERS=<n>` for a longer soak.

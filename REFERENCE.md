@@ -22,6 +22,11 @@ stack exec lindana -- --parse file.lind     # parse + render (round-trip check)
 
 - The process exit code is the program's `exit` value (`exit 0` = success;
   other values are taken mod 256 as failure codes). `panic` exits 1.
+- `--seed N` pins `rand`'s seed; `--seed random` draws the seed from
+  system entropy (issue #41). The default is a fixed constant, so runs
+  are reproducible out of the box — reproducible chaos. Provisional,
+  flip-worthy: an entropy default is the honest option for a language
+  whose point is races.
 - `--parse` prints the parsed AST rendered back to source. The renderer
   outputs desugared forms (see §3), which reparse to an equal AST.
 - If every machine is blocked on a match that never arrives, the run is
@@ -65,7 +70,7 @@ whichever action consumes a value checks its semantics.
 | Double | `3.14` | Decimal literal. Ints and doubles do not cross-match in patterns, and mixed int/double arithmetic is an error. |
 | Tuple | `(a, b, c)`, `(Tick,)`, `()` | Comma-separated; a 1-tuple needs the trailing comma (`(x)` is grouping). `()` is the empty tuple. |
 | List | `[1, 2, 3]`, `[h \| t]`, `[]` | Pure sugar for nested 2-tuples ending in the atom `Nil`: `[a, b]` IS `(a, (b, Nil))`. Not a primitive type; `Nil` is an ordinary atom. |
-| Casual string | `"hi"`, `"a\nb"` | Pure sugar for the cons-list of codepoint ints: `"hi"` IS `[104, 105]`. No string type exists. |
+| Casual string | `"hi"`, `"a\nb"` | Pure sugar for the cons-list of codepoint ints: `"hi"` IS `[104, 105]`. No string type exists. Codepoints are Unicode scalar values: a surrogate (U+D800..U+DFFF) reaching a string consumer is an error (§7 — found by the fuzzing suite, issue #41). |
 | Character | `'x'`, `'\n'`, `''` | Pure sugar for the single codepoint as an Int: `'a'` IS `97`. `''` IS `Nil`. Multiple codepoints in `'…'` are a parse error (that's what `"...\"` is for). Escapes: `\n`, `\t`, `\'`, `\\`. |
 | Bytestring handle | an atom | An ordinary atom that names an entry in the runtime's bytestring side-table (§11). Opaque to the matcher. |
 | File handle | an atom | An ordinary atom naming an entry in the fd table (§13). |
@@ -187,7 +192,7 @@ of `e` (which must be a tuple) element-wise into the surrounding tuple:
 
 | Builtin | Result |
 |---|---|
-| `rand(n)` | Int in `0..n-1` (deterministic seed — runs are reproducible). `rand` of non-positive is `0`. |
+| `rand(n)` | Int in `0..n-1`. Seeded from the runtime's seed: the default is a fixed constant (runs are reproducible); `--seed N` pins another, `--seed random` draws from entropy (§1). `rand` of non-positive is `0`. |
 | `typeOf(x)` | Shape atom: `Int`, `Double`, `Atom`, `Tuple`. |
 | `atomize(s)` | Casual string → atom. Fatal unless the string is capitalized (case is the only atom/variable signal; atoms must re-spell as source). |
 | `atos(a)` | Atom → casual string (codepoint list). `atos(atomize("Foo"))` round-trips. |
