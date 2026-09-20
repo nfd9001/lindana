@@ -53,7 +53,8 @@ runMain src = do
                     , hookStdout = hout
                     , hookStderr = stderr
                     , hookPanic = \s -> modifyIORef' panicRef (s :)
-                    , hookModDir = "test/modules", hookSeed = mkStdGen 12345 }
+                    , hookModDir = "test/modules", hookSeed = mkStdGen 12345
+                    , hookChaos = noChaos, hookChaosSeed = mkStdGen 271828 }
   mrr <- timeout (10 * 1000000)
            (runLoaded hooks (loadedMachines l) (loadedInitial l))
   rr <- case mrr of

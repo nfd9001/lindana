@@ -91,6 +91,8 @@ captureHooks = do
         , hookPanic  = \m -> modifyIORef' panics (m :)
         , hookModDir = "."
         , hookSeed   = mkStdGen 12345
+        , hookChaos  = noChaos
+        , hookChaosSeed = mkStdGen 271828
         }
   closedRef <- newIORef False
   let said = do
@@ -980,7 +982,8 @@ spec = do
       (perr, herr) <- openBinaryTempFile d "lindana-say-test"
       let hooks = Hooks { hookStdin = stdin, hookStdout = hout
                         , hookStderr = herr, hookPanic = \_ -> pure ()
-                        , hookModDir = ".", hookSeed = mkStdGen 12345 }
+                        , hookModDir = ".", hookSeed = mkStdGen 12345
+                        , hookChaos = noChaos, hookChaosSeed = mkStdGen 271828 }
           b = machine [] [ BytesBind "E" (str "err!"), Die ]
           m = machine (take1 (PTuple [a "Bytes", a "E"]))
                 [ FWrite (EAtom "Stderr") (EAtom "E"), Exit (int 0) ]
@@ -997,7 +1000,8 @@ spec = do
       hin' <- openBinaryFile pin ReadMode
       let hooks = Hooks { hookStdin = hin', hookStdout = hout
                         , hookStderr = stderr, hookPanic = \_ -> pure ()
-                        , hookModDir = ".", hookSeed = mkStdGen 12345 }
+                        , hookModDir = ".", hookSeed = mkStdGen 12345
+                        , hookChaos = noChaos, hookChaosSeed = mkStdGen 271828 }
           -- Three reads through the line-mode fd, each gated on the
           -- previous read's (Fread, Stdin) tuple (the gate exists only
           -- after the read effect ran) plus a counter tuple. The

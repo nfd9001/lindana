@@ -29,4 +29,8 @@ stack exec lindana -- examples/hello.lind
 `stack test` also runs `lindana-fuzz` — a property/fuzzing suite that
 sweeps generated inputs and schedules against the runtime's contract
 (issue #41). Pin the seed with `LINDANA_FUZZ_SEED=<n>` and scale it up
-with `LINDANA_FUZZ_ITERS=<n>` for a longer soak.
+with `LINDANA_FUZZ_ITERS=<n>` for a longer soak. Tier 0 sweeps pure
+properties over generated cases; Tier 1 turns the engine's own chaos
+knob up (`--chaos`, §11.13) — a contested conservation property under
+stirred schedules, and a seed-sweep of every example against its
+no-chaos baseline.

@@ -467,7 +467,8 @@ runCaptureSay ms initial = do
                     , hookStdout = hout
                     , hookStderr = stderr
                     , hookPanic = \_ -> pure ()
-                    , hookModDir = ".", hookSeed = mkStdGen 12345 }
+                    , hookModDir = ".", hookSeed = mkStdGen 12345
+                    , hookChaos = noChaos, hookChaosSeed = mkStdGen 271828 }
   rr <- runLoaded hooks ms initial
   hClose hout
   said <- lines <$> readFile p
@@ -486,7 +487,8 @@ silentHooks = do
     , hookStdout = hout
     , hookStderr = herr
     , hookPanic  = \_ -> pure ()
-    , hookModDir = ".", hookSeed = mkStdGen 12345 }
+    , hookModDir = ".", hookSeed = mkStdGen 12345
+    , hookChaos = noChaos, hookChaosSeed = mkStdGen 271828 }
 
 -- | A unique scratch file (created empty) for fd e2e tests, left in
 -- the OS temp dir — empty and harmless (the ModuleSpec twin's

@@ -27,6 +27,13 @@ stack exec lindana -- --parse file.lind     # parse + render (round-trip check)
   are reproducible out of the box — reproducible chaos. Provisional,
   flip-worthy: an entropy default is the honest option for a language
   whose point is races.
+- `--chaos N|random` turns on the in-engine chaos knob (issue #41
+  Tier 1): seeded µs-scale micro-yields around each match commit and
+  between commit and re-arm, plus shuffled cross-bundle picks from the
+  effect queue — the engine's own timing becomes deliberately chaotic,
+  with the seed replaying the chaos. Default: off, exactly the
+  historical engine. The fuzzing suite also sweeps runner counts and
+  shuffle probabilities per run (§11.13).
 - `--parse` prints the parsed AST rendered back to source. The renderer
   outputs desugared forms (see §3), which reparse to an equal AST.
 - If every machine is blocked on a match that never arrives, the run is
@@ -369,14 +376,18 @@ consumers `rd`/take them to sequence deterministically:
 |---|---|
 | `bytesBind`, `bytesNew` | `(Bytes, H)` |
 | `fopen` | `(Fopen, H)` |
-| `fopen` | `(Fopen, H)` |
 | `fread` | `(Fread, H)` |
 | `fwrite` | `(Fwrote, H)` |
 | `import` | `(Imported, H, S)` — `H` as written; a promoted import's `H` is the anonymous `Auto<n>` atom (gate on the suffix) |
 
 The startup one-shot (`bytesBind`, prelude statics) runs before other
 machines in practice, but the guarantee is by convention: gate on the
-completion tuple when ordering matters.
+completion tuple when ordering matters. Within one body, effect order
+is contract; across bodies, the effect queue's cross-bundle order is
+emergent — an in-transaction `out` is /not/ a gate for an effect
+queued alongside it (the effect has not run yet; see `files.lind` and
+`stdio.lind` for the gated shape). The `--chaos` flag stirs exactly
+this order on demand (§1).
 
 ---
 

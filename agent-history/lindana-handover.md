@@ -280,7 +280,7 @@ Roughly in order of how foundational they are:
 10. **Top-level program grammar**: now that named bags exist, how do multiple `Name { ... }` blocks, `Global`'s implicit initial-tuple literal, and any other bag's initial state compose into one program's file-level syntax? Flagged early, never revisited. **Provisionally resolved** (§13.6, branch `runtime/named-bags-loader`): a `{ … }` initial block belongs to its nearest enclosing bag — top level is `Global`'s; at most one per bag; nothing else nests (a bag block may not contain another bag block, §6 — sharding is internal, §6.3).
 11. **Bytestring reclamation** — explicitly punted for now (§9); revisit if it matters later.
 12. **Default-Error-machine shutdown hazard**: a program that declares no `Error` block (so the §6.4 default `(c!) : panic c` machine is installed), has no `exit` path, and whose machines all terminate via `die` can never shut down cleanly — the default machine is an immortal parked thread, `rtsLive` never reaches 0, and the RTS aborts with `BlockedIndefinitelyOnSTM`, which Main.hs reports as the §1 deadlock message (exit 1) for what should be a clean exit 0. Repro and candidate fixes in `agent-history/messageboard/sleep-experiment/README.txt` (finding 5), discovered during the §13.21 sleep experiment. — **provisionally resolved** (§13.22, branch `runtime/idle-shutdown`): idle-exempt machines (`machIdle`) are not counted in the live total, and the shutdown check drains idle bags before cancelling so the guaranteed panic survives. Flip-worthy if any future machine class needs "parks forever but still gates shutdown".
-13. **`rand`'s default seed, and schedule-chaos knobs** (issue #41): the fixed constant default (`mkStdGen 12345`) is honest reproducibility for a language about races, but an entropy default is the flip-worthy alternative; the seed is now plumbing (`Hooks.hookSeed`, `--seed N|random` — §13.26). The broader fuzzing plan (Tier 1's in-engine chaos knob, Tier 2's program generator + oracles) lives in the issue: micro-yields between match-commit and bundle-push, a shuffled/pooled effect-runner drain, and multi-runner `runLoaded` variants as probes for what the single-runner FIFO actually promises (§11.7).
+13. **`rand`'s default seed, and schedule-chaos knobs** (issue #41): the fixed constant default (`mkStdGen 12345`) is honest reproducibility for a language about races, but an entropy default is the flip-worthy alternative; the seed is now plumbing (`Hooks.hookSeed`, `--seed N|random` — §13.26). The broader fuzzing plan (Tier 1's in-engine chaos knob, Tier 2's program generator + oracles) lives in the issue: micro-yields between match-commit and bundle-push, a shuffled/pooled effect-runner drain, and multi-runner `runLoaded` variants as probes for what the single-runner FIFO actually promises (§11.7). — **Tier 1 provisionally resolved** (§13.27, branch `fuzz/chaos-knob`): the knob is `Chaos` on `Hooks` (`--chaos N|random`; micro-yields, shuffled queue picks, multi-runner `runLoadedN`), disabled by default; the examples seed-sweep found an emergent-FIFO reliance in two examples and a real commit→push bundle-loss window in the engine (fixed: bundles queue in the matching transaction). Entropy-default for `rand` remains the recorded flip.
 
 ---
 
@@ -1533,3 +1533,86 @@ constant.
   (`dejafu`/`io-sim` systematic interleaving) stays deferred pending
   what the soaks find. Unchanged carries: `bytesBind` handle as
   expression, unified error routing (§3.3/§7.3), append mode (`A`).
+
+### 13.27 Done — the chaos knob, Tier 1 (§11.13, issue #41), branch `fuzz/chaos-knob`
+
+Issue #41's Tier 1: the in-engine chaos knob — deliberate, seeded
+randomness in the engine's own timing — plus the two chaos properties it
+enables. The knob stirs the two places a schedule is otherwise fixed,
+each dimension probing one thing the fixed-timing design quietly
+promises:
+
+- **The knob** (`Chaos` in "Lindana.Machine", carried on `Hooks` next to
+  `hookModDir`/`hookSeed`, the provisional-knob precedent; RTS gains
+  `rtsChaos :: TVar StdGen`, seeded from `hookChaosSeed` — separate from
+  `rtsSeed`, so chaos never perturbs `rand` and vice versa):
+  - `chaosMicro` — a seeded µs-scale `threadDelay` (0..250, provisional
+    magnitude) before each match attempt and between commit and re-arm,
+    per machine thread.
+  - `chaosShuffle p` — with probability p the effect runner picks a
+    random queued bundle instead of the head (drain atomically, pick,
+    requeue the rest in order): cross-bundle effect order becomes
+    emergent, within-bundle order stays contract.
+  - `chaosRunners n` — n effect-runner threads via the new exported
+    `runLoadedN` (the §11.7 probe: distinct bundles run concurrently,
+    a bundle stays one live sequence on one runner).
+  `noChaos` (the default, exactly the historical engine) and `fullChaos`
+  (micro + p=0.5 + 1 runner) are the canned shapes; CLI: `--chaos
+  N|random` (later flag wins, the `--seed` precedent).
+- **Two harness bugs found while building the sweep** (the fuzzer ate
+  its own dogfood again): `hookStdin = error "…"` dies — `newRTSWith`
+  calls `hSetBinaryMode` on all three std handles; and a full-record
+  `Hooks` construction missing the new fields is only a *warning*
+  (`-Wmissing-fields`) whose runtime error kills every test that uses
+  the helper — check `-Wall` output, not just exit status.
+- **The properties** (`Lindana.Fuzz.Chaos`, run after the Tier-0 ones;
+  the sweep's corpus is `examples/` only — `test/modules` are import
+  fragments): (1) *conservation under chaos* — n dispatchers + n
+  workers contesting in one bag under a fully randomized config
+  (including multi-runner drains): every `Job` delivered exactly once,
+  nothing else left, clean exit, whatever the stir does; (2) the
+  *examples seed-sweep* — every example under a randomized chaos run
+  must end in the same normalized outcome (exit code / deadlock / hang)
+  as its precomputed no-chaos baseline. Strict on purpose: a deviation
+  is a finding, not noise. Statistical, not deterministic — the seed
+  pins the chaos, not the OS scheduler; that is the point.
+- **The finds** — three real ones in the first soaks, all the same
+  species (an example or the engine leaning on emergent cross-bundle
+  FIFO):
+  1. `examples/files.lind` said `%b Back` gated on an in-transaction
+     `out ((Show,))` — the read queued alongside it had not run; under
+     shuffle the say hit an unknown bytestring handle (fatal, exit 1).
+     Fixed by gating on `(Fread, Back)`, with the second phase joining
+     gate + a `(Round,)` marker so only the *second* read satisfies it.
+  2. `examples/stdio.lind`, twice: `say %b Stdin` gated on `(Read,)`
+     (raced the `fread` landing) and `say`→`Log` gated on `(Routed,)`
+     (raced the `fopen`). Fixed by gating on `(Fread, Stdin)` /
+     `(Fopen, Log)` — the §14 convention the examples predated.
+  3. **The engine one**: a bundle was queued *post-commit*, so a
+     machine cancelled between its commit and its push (shutdown wins
+     the race once `exit` lands) dropped a decided, committed bundle —
+     `stdio.lind`'s rerouted say vanished (exit 0, empty file,
+     reproducible under `--chaos`). Fixed: the bundle now queues IN the
+     matching transaction (`machineThread`'s `pushSTM`), atomically with
+     the commit — the runner can never see a committed tuple without
+     the bundle that produced it. This is a semantics-adjacent change
+     to §7.2's mechanics (recorded in the `Bundle`/module-header docs);
+     the queue-drain contract itself is unchanged.
+- **Verification**: both suites green under `stack test` (246 examples,
+  0 failures; all seven properties held); soaks: 300 iters pinned
+  (`20260920`) + 300 at entropy, all green; zero `-Wall` warnings;
+  `--parse` round-trip swept over every example; examples re-run (exit
+  codes unchanged, the pre-existing 1s being their designed
+  panics/deadlocks); CLI `--chaos N|random` verified on
+  `hello`/`files`/`stdio` (deterministic output across 20 seeds for
+  both fixed examples); the two found-by-chaos examples verified stable
+  under 15 chaos seeds each.
+- **Next**: Tier 2 — the program generator + the six oracles (the
+  conservation property here is oracle 1 in miniature); Tier 3
+  (`dejafu`/`io-sim`) stays deferred pending what the soaks find —
+  note the engine fix above is exactly the class of finding that would
+  argue for it. Also: `--chaos` exposes micro+shuffle only; runner
+  count is a library/harness knob (`runLoadedN`) — flip-worthy to
+  promote to the CLI if a use appears. Unchanged carries: `bytesBind`
+  handle as expression, unified error routing (§3.3/§7.3), append mode
+  (`A`).

@@ -3,6 +3,18 @@
 -- in Global, data pushed and pulled through the §9 bytestring
 -- side-table. The file is created next to this program and left
 -- behind — open it to see what the machines wrote.
+--
+-- Every say is gated on the completion tuple of the read that
+-- produced its content (§14): a (Fread, H) gate lands atomically with
+-- the side-table write, so when the gate is matchable the content is
+-- there. An in-transaction `out` (the old (Show,) shape) is NOT such
+-- a gate — the §8.2 two-phase split means the read queued next to it
+-- has not run yet — so under a shuffled effect queue or concurrent
+-- runners (§11.13, the chaos knob) that shape could say before its
+-- read landed (unknown bytestring handle, fatal). The second phase
+-- joins on the gate AND a (Round,) marker: the marker exists only
+-- after the first gate was consumed, so only the SECOND (Fread, Back)
+-- can satisfy it.
 
 : fopen Log "files-out.tmp" W
 (Fopen, Log) : bytesBind Line "first line from the machines"
@@ -11,6 +23,6 @@
 -- The first fread pulls the whole file (the read fd is spent — strict
 -- hGetContents closes the OS handle as it reads); the second sees the
 -- empty remainder.
-(Fopen, Back) : [fread Back; (Show,)]
-(Show,) : [say "read back: %b" Back; fread Back; (Empty,)]
-(Empty,) : [say "second fread (fd spent): [%b]" Back; exit 0]
+(Fopen, Back) : fread Back
+(Fread, Back) : [say "read back: %b" Back; (Round,); fread Back; die]
+(Fread, Back), (Round,) : [say "second fread (fd spent): [%b]" Back; exit 0]

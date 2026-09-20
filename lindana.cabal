@@ -71,6 +71,7 @@ test-suite lindana-fuzz
     main-is:          FuzzMain.hs
     other-modules:    Lindana.Fuzz.Gen
                       Lindana.Fuzz.Spec
+                      Lindana.Fuzz.Chaos
     hs-source-dirs:   test/fuzz
     build-depends:    base
                     , text
