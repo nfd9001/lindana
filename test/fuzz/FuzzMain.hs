@@ -12,11 +12,15 @@
 -- On the first failure: report the property, the master seed, the
 -- iteration index, and the counterexample; exit 1. Replay with
 -- @LINDANA_FUZZ_SEED=<seed>@.
+--
+-- §11.13 (issue #41 Tier 1): the chaos properties ("Lindana.Fuzz.Chaos")
+-- run after the Tier-0 ones — the in-engine chaos knob turned up over
+-- a contested schedule, and a seed-sweep of the examples corpus.
 module Main (main) where
 
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
-import Data.List (isSuffixOf, sort)
+import Data.List (isPrefixOf, isSuffixOf, sort)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -28,6 +32,7 @@ import System.IO (hPutStrLn, stderr)
 import System.Random (mkStdGen, randomIO, split)
 import Text.Read (readMaybe)
 
+import Lindana.Fuzz.Chaos (baselinesFor, chaosSpecs)
 import Lindana.Fuzz.Spec (PropertySpec (..), propertySpecs)
 
 main :: IO ()
@@ -35,11 +40,17 @@ main = do
   (masterSeed, fromEntropy) <- seedFromEnv
   iters <- itersFromEnv
   corpus <- loadCorpus
-  let specs = propertySpecs corpus
+  -- The chaos sweep runs whole programs, not fragments: only the
+  -- examples are runnable programs (the test modules are import
+  -- fragments, Tier-0 property 5's corpus).
+  let runCorpus = [(p, t) | (p, t) <- corpus, "examples/" `isPrefixOf` p]
+  baselines <- baselinesFor runCorpus
+  let specs = propertySpecs corpus ++ chaosSpecs runCorpus baselines
   putStrLn $ "lindana-fuzz: seed=" ++ show masterSeed
           ++ (if fromEntropy then " (entropy; replay with LINDANA_FUZZ_SEED)" else "")
           ++ " iters=" ++ show iters
           ++ " corpus=" ++ show (length corpus)
+          ++ " examples=" ++ show (length runCorpus)
   forM_ specs $ \spec -> do
     outcome <- runProperty spec iters masterSeed
     case outcome of

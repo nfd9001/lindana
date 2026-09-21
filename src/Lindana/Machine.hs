@@ -17,7 +17,8 @@
 --     atomically with the match and each other. Every irrevocable
 --     verb (@say@, @sleep@, @exit@, @panic@, @bytesBind@,
 --     @bytesDestroy@, @bytesNew@) comes back as a deferred /bundle/ of effects,
---     pushed post-commit.
+--     queued in that same transaction (§11.13 finding: a post-commit
+--     push had a commit→push gap a shutdown could park in).
 --
 --   * The 'effectRunner' is a single thread draining bundles FIFO
 --     from a 'TQueue', one bundle live at a time — sequencing and
@@ -82,8 +83,9 @@
 --
 -- §11.6 (effect-bundle grammar) is provisionally resolved here as a
 -- decision note rather than syntax: the bundle /is/ a machine
--- reaction's post-commit action list — the 'Effect' list this
--- interpreter returns and the runner drains. There is no concrete
+-- reaction's deferred action list — the 'Effect' list this
+-- interpreter returns (queued in the matching transaction) and the
+-- runner drains. There is no concrete
 -- syntax to write, and none is wanted: bundles are a runtime concept,
 -- not a user construct (the user already writes the action list; the
 -- transaction/deferred split is the implementation of §7.2/§8.2).
@@ -116,6 +118,13 @@
 --     issue #41): the CLI's @--seed N|--seed random@ and the fuzzing
 --     suite drive it; an entropy default is the flip-worthy alternative
 --     (§11).
+--   * The engine's own timing is also deliberately chaotic on demand
+--     (§11.13, issue #41 Tier 1): 'Chaos' — seeded micro-yields around
+--     the match-commit and bundle-push points, a shuffled effect-queue
+--     pick, and a multi-runner drain — each dimension probing what the
+--     fixed-timing, FIFO, single-runner design actually promises
+--     (§11.7). 'noChaos' (the default) is exactly the historical
+--     engine; @--chaos N|random@ turns it on ('fullChaos').
 --   * Shutdown is abrupt: once every machine is done or the program
 --     has exited, remaining threads are cancelled. A machine
 --     committing concurrently with shutdown may or may not land its
@@ -124,6 +133,9 @@ module Lindana.Machine
   ( -- * The RTS
     RTS (..)
   , Hooks (..)
+  , Chaos (..)
+  , noChaos
+  , fullChaos
   , defaultHooks
   , newRTS
   , newRTSWith
@@ -147,6 +159,7 @@ module Lindana.Machine
   , runProgram
   , runProgramWith
   , runLoaded
+  , runLoadedN
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -271,6 +284,15 @@ data RTS = RTS
                                       --   counter, not @rand@: determinism
                                       --   (runs are reproducible) and no
                                       --   burning the shared seed.
+  , rtsChaos :: TVar StdGen           -- ^ the §11.13 chaos knob's
+                                      --   generator (issue #41 Tier 1):
+                                      --   seeded from 'Hooks.hookChaosSeed'
+                                      --   — separate from 'rtsSeed' so
+                                      --   chaos never perturbs @rand@'s
+                                      --   sequence (and vice versa).
+                                      --   Draws are pure over a TVar, so
+                                      --   they read and commit like any
+                                      --   other RTS state.
   , rtsHooks :: Hooks
   }
 
@@ -305,7 +327,57 @@ data Hooks = Hooks
                                    --   flip-worthy alternative (§11).
                                    --   Provisional home for this knob
                                    --   (same precedent as 'hookModDir').
+  , hookChaos :: Chaos               -- ^ §11.13 (issue #41 Tier 1): the
+                                   --   in-engine chaos knob — 'noChaos'
+                                   --   by default, exactly the
+                                   --   historical engine; the CLI's
+                                   --   @--chaos N|random@ and the
+                                   --   fuzzing suite turn it on
+                                   --   ('fullChaos'). Provisional home
+                                   --   for this knob (same precedent
+                                   --   as 'hookModDir').
+  , hookChaosSeed :: StdGen          -- ^ the chaos generator's seed —
+                                   --   separate from 'hookSeed' so chaos
+                                   --   never perturbs @rand@'s sequence
+                                   --   (and vice versa). A fixed
+                                   --   constant by default: a failing
+                                   --   chaos run replays.
   }
+
+-- | §11.13 (issue #41, Tier 1): the in-engine chaos knob —
+-- deliberate, seeded randomness in the engine's own timing. The
+-- current suites sample exactly one schedule per program; these are
+-- the levers that stir the schedule, each probing one thing the
+-- fixed-timing design quietly promises. Every dimension is
+-- provisional and flip-worthy; 'noChaos' is exactly the historical
+-- engine.
+data Chaos = Chaos
+  { chaosMicro :: Bool
+    -- ^ a random µs-scale 'threadDelay' before each match attempt and
+    --   between match-commit and bundle push, per machine thread —
+    --   stirring the machine-level timing the real scheduler would
+    --   otherwise fix.
+  , chaosShuffle :: Double
+    -- ^ probability (0..1) that the effect runner picks a random
+    --   queued bundle instead of the head: cross-bundle effect order
+    --   becomes emergent, within-bundle order stays contract (§7.2).
+    --   0 = exactly FIFO.
+  , chaosRunners :: Int
+    -- ^ how many effect-runner threads to start (>1 probes the §11.7
+    --   single-runner serialization: distinct bundles run
+    --   concurrently; within-bundle order still holds — a bundle is
+    --   one live sequence on one runner).
+  } deriving (Eq, Show)
+
+-- | The knob off: exactly the historical engine.
+noChaos :: Chaos
+noChaos = Chaos { chaosMicro = False, chaosShuffle = 0, chaosRunners = 1 }
+
+-- | The knob fully on (the CLI's @--chaos@ shape, and the fuzzing
+-- suite's base): micro-yields, half of queue picks shuffled, one
+-- runner. Provisional shape (flip-worthy).
+fullChaos :: Chaos
+fullChaos = Chaos { chaosMicro = True, chaosShuffle = 0.5, chaosRunners = 1 }
 
 defaultHooks :: Hooks
 defaultHooks = Hooks
@@ -315,6 +387,8 @@ defaultHooks = Hooks
   , hookPanic  = hPutStrLn stderr . ("panic: " ++)
   , hookModDir = "."
   , hookSeed   = mkStdGen 12345
+  , hookChaos  = noChaos
+  , hookChaosSeed = mkStdGen 271828
   }
 
 -- | §13.18: the std fd-table names. Ordinary atoms — @fopen@ can
@@ -369,6 +443,7 @@ newRTSWith hooks = do
       , (stdFdErr, FdState herr FdWrite False False)
       ])
     fresh <- newTVar 0
+    chaos <- newTVar (hookChaosSeed hooks)
     pure RTS { rtsBag = bag, rtsQueue = queue, rtsSeed = seed
              , rtsLive = live, rtsExit = exit, rtsStop = stop
              , rtsBags = bags, rtsBytes = bytes
@@ -376,6 +451,7 @@ newRTSWith hooks = do
              , rtsReroute = reroute, rtsSayFd = sayFd
              , rtsHooks = hooks
              , rtsFds = fds, rtsFresh = fresh
+             , rtsChaos = chaos
              }
 
 -- | Resolve a bag name to its 'RBag' (§6). @Global@ is the main bag;
@@ -420,8 +496,14 @@ lobSTM rts bagName t = do
 -- effect runner below) needs it too, and it must not depend on the
 -- machine layer — see the Def module header.
 
--- | A bundle of deferred effects (§7.2): queued post-commit, drained
--- FIFO by the effect-runner, one bundle live at a time.
+-- | A bundle of deferred effects (§7.2): queued IN the matching
+-- transaction — atomically with the commit that decided it, so the
+-- runner can never observe the committed tuple without the bundle
+-- that produced it (the old post-commit push had a commit→push gap
+-- that §11.13 chaos could park a shutdown in: the bundle was decided,
+-- committed, and then its machine was cancelled before the push —
+-- the effects just vanished; found by the chaos sweep, issue #41) —
+-- and drained FIFO by the effect-runner, one bundle live at a time.
 newtype Bundle = Bundle { bundleEffects :: [Effect] }
   deriving (Eq, Show)
 
@@ -968,6 +1050,15 @@ truthy _               = True
 -- interpret → re-arm. @die@ (or terminal @exit@\/@panic@) ends the
 -- thread; an empty-pattern machine runs once, unconditionally, at
 -- start (§1).
+--
+-- §11.13 (issue #41 Tier 1): when the chaos knob's micro-yield is on,
+-- the thread draws a seeded µs-scale delay before each match attempt
+-- and again between commit and re-arm — the two points where a
+-- machine thread's internal timing is otherwise fixed. Off
+-- ('noChaos'): zero cost, exactly the historical loop.
+--
+-- The bundle queues /in/ the matching transaction (see 'Bundle'): the
+-- match commit and the bundle's queueing are one atomic step.
 machineThread :: RTS -> RBag -> MachineDef -> IO ()
 machineThread rts bag m = go `finally` decLive
   where
@@ -978,64 +1069,127 @@ machineThread rts bag m = go `finally` decLive
 
     go
       | null (machJoin m) = do   -- §1: one-shot, unconditionally, at start
-          (effs, _) <- atomically
-            (interpretActions rts bag (machSfx m) (machBag m) Map.empty
-                              (machBody m))
-          push effs
+          _ <- atomically $ do
+            r <- interpretActions rts bag (machSfx m) (machBag m) Map.empty
+                              (machBody m)
+            pushSTM r
+            pure r
           pure ()                -- implicitly terminates after firing
       | otherwise = loop
 
     loop = do
-      (effs, survived) <- atomically $ do
+      chaosYield rts                    -- before each match attempt
+      (_, survived) <- atomically $ do
         mr <- matchJoinSTM bag (machJoin m)
         case mr of
           Nothing -> retry
-          Just mt ->
+          Just mt -> do
             -- Commit point (§3.2): the match is committed for good —
             -- no retry can reach back. Interpret the body in the same
             -- transaction so its tuple-space writes land atomically
             -- with the match (the §8.2 note); irrevocables come back
-            -- as a deferred bundle for the effect-runner (§7.2).
-            interpretActions rts bag (machSfx m) (machBag m) (matchEnv mt)
-                             (machBody m)
-      push effs
+            -- as a deferred bundle for the effect-runner (§7.2), and
+            -- queue in this same transaction ('Bundle').
+            r <- interpretActions rts bag (machSfx m) (machBag m)
+                             (matchEnv mt) (machBody m)
+            pushSTM r
+            pure r
+      chaosYield rts                    -- between commit and re-arm
       when survived loop
 
-    push effs =
-      unless (null effs) $
-        atomically (writeTQueue (rtsQueue rts) (Bundle effs))
+    pushSTM (effs, _) =
+      unless (null effs) $ writeTQueue (rtsQueue rts) (Bundle effs)
+
+-- | §11.13 (issue #41 Tier 1): the seeded micro-yield — a random
+-- µs-scale 'threadDelay' drawn from the chaos generator, when
+-- 'chaosMicro' is on. Drawn in IO (the delay is IO anyway); the
+-- generator is an ordinary TVar, so concurrent draws are just STM
+-- commits (draws are independent, so racing writers lose nothing).
+chaosYield :: RTS -> IO ()
+chaosYield rts
+  | chaosMicro (hookChaos (rtsHooks rts)) = do
+      g <- readTVarIO (rtsChaos rts)
+      let (us, g') = uniformR (0, chaosMaxDelayUs) g
+      atomically (writeTVar (rtsChaos rts) g')
+      threadDelay us
+  | otherwise = pure ()
+
+-- | The micro-yield's magnitude, µs — micro. Provisional
+-- (flip-worthy): large enough to interleave scheduler slices on real
+-- hardware, small enough that soaks stay fast.
+chaosMaxDelayUs :: Int
+chaosMaxDelayUs = 250
 
 --------------------------------------------------------------------------------
 -- The effect-runner (§7.2)
 --------------------------------------------------------------------------------
 
--- | Drains bundles FIFO from the 'TQueue', one bundle fully live at a
--- time: sequencing and synchronization from a single thread and a
--- queue — no bespoke machinery, per §7.2. Provisionally global (§7.3
--- open): unrelated bags' I/O serializes against each other.
--- | Drains bundles FIFO from the 'TQueue', one bundle fully live at a
--- time: sequencing and synchronization from a single thread and a
--- queue — no bespoke machinery, per §7.2. Provisionally global (§7.3
--- open): unrelated bags' I/O serializes against each other.
+-- | Drains bundles from the 'TQueue', one bundle fully live at a
+-- time per runner: sequencing and synchronization from a single
+-- thread and a queue — no bespoke machinery, per §7.2.
+-- Provisionally global (§7.3 open): unrelated bags' I/O serializes
+-- against each other. (§11.13, issue #41 Tier 1: the chaos knob can
+-- shuffle the cross-bundle pick and start several of these — see
+-- 'runLoadedN' — probing what the FIFO\/single-runner design
+-- actually promises; §11.7.)
 --
--- Shutdown is graceful: once @rtsStop@ is set, the runner finishes its
--- current bundle, drains the queue, and returns — every queued bundle
--- is fully executed before a program run returns. Cancelling the
--- runner instead would drop a bundle mid-@sleep@; we never do.
+-- Shutdown is graceful: once @rtsStop@ is set, the runner finishes
+-- its current bundle, drains the queue, and returns — every queued
+-- bundle is fully executed before a program run returns. Cancelling
+-- the runner instead would drop a bundle mid-@sleep@; we never do.
 effectRunner :: RTS -> IO ()
 effectRunner rts = loop
   where
     loop = do
-      mb <- atomically $ do
-        stop <- readTVar (rtsStop rts)
-        b    <- tryReadTQueue (rtsQueue rts)
-        case (b, stop) of
-          (Just _, _)      -> pure b
-          (Nothing, False) -> retry         -- keep waiting for bundles
-          (Nothing, True)  -> pure Nothing
+      mb <- nextBundle
       case mb of
         Nothing            -> pure ()   -- queue empty and stopping
         Just (Bundle effs) -> runBundle rts effs >> loop
+
+    -- Pull the next bundle. With chaos 'chaosShuffle' p > 0, the
+    -- runner (with probability p) picks a random queued bundle
+    -- instead of the head: the queue is drained atomically, one is
+    -- picked from the chaos generator, and the others requeued in
+    -- their original order — the chosen bundle jumps ahead of some
+    -- bundles and behind others, so cross-bundle effect order
+    -- becomes emergent while within-bundle order (the contract,
+    -- §7.2) is untouched. A head pick (r >= p, or p == 0) requeues
+    -- the rest and stays exactly FIFO.
+    nextBundle = atomically $ do
+      stop <- readTVar (rtsStop rts)
+      bs <- drainTQueue (rtsQueue rts)
+      case bs of
+        [] | stop -> pure Nothing
+           | otherwise -> retry         -- keep waiting for bundles
+        (b : rest) -> do
+          let p = chaosShuffle (hookChaos (rtsHooks rts))
+          if p > 0
+            then do
+              g <- readTVar (rtsChaos rts)
+              let (r, g1) = uniformR (0, 1) g :: (Double, StdGen)
+                  (i, g2) = uniformR (0, length bs - 1) g1 :: (Int, StdGen)
+              writeTVar (rtsChaos rts) g2
+              if r < p
+                then do
+                  mapM_ (writeTQueue (rtsQueue rts))
+                        [x | (j, x) <- zip [0 :: Int ..] bs, j /= i]
+                  pure (Just (bs !! i))
+                else do
+                  mapM_ (writeTQueue (rtsQueue rts)) rest
+                  pure (Just b)
+            else do
+                  mapM_ (writeTQueue (rtsQueue rts)) rest
+                  pure (Just b)
+
+-- | Empty a 'TQueue', oldest first.
+drainTQueue :: TQueue a -> STM [a]
+drainTQueue q = go []
+  where
+    go acc = do
+      mb <- tryReadTQueue q
+      case mb of
+        Nothing -> pure (reverse acc)
+        Just x  -> go (x : acc)
 
 -- | Run one bundle's effects sequentially. No rollback on partial
 -- failure (§7.2's final bullet): a failed effect leaves earlier
@@ -1425,12 +1579,26 @@ runProgramWith hooks machines initial =
   runLoaded hooks machines initial
 
 -- | Run a loaded program (§6): one thread per machine, each matching
--- the bag its 'MachineDef' names; initial tuples land per bag. Bags
+-- the bag its 'MachineDef' names; initial tuples land per bag. The
+-- effect-runner count comes from the chaos knob ('chaosRunners') —
+-- 1 by default, the historical single global runner (§7.3, §11.7).
+-- Bags
 -- are resolved (and created on demand) through 'bagForSTM', so a
 -- machine's bag and any @lob@ target with the same name are the same
 -- structure.
 runLoaded :: Hooks -> [MachineDef] -> Map Name [Expr] -> IO RunResult
-runLoaded hooks machines initial = do
+runLoaded hooks machines initial =
+  runLoadedN (max 1 (chaosRunners (hookChaos hooks))) hooks machines initial
+
+-- | 'runLoaded' with an explicit number of effect-runner threads
+-- (§11.13, issue #41 Tier 1) — the probe for what the §11.7
+-- single-runner serialization actually promises: with N > 1,
+-- distinct bundles run concurrently while within-bundle order still
+-- holds (a bundle is one live sequence on one runner). The
+-- historical shape is @'runLoadedN' 1@. The harness sweeps N; the
+-- knob is provisional and flip-worthy.
+runLoadedN :: Int -> Hooks -> [MachineDef] -> Map Name [Expr] -> IO RunResult
+runLoadedN nRunners hooks machines initial = do
   rts <- newRTSWith hooks
   atomically $ do
     mapM_ (\(n, es) ->
@@ -1450,7 +1618,7 @@ runLoaded hooks machines initial = do
                     b <- atomically (bagForSTM rts (machBag m))
                     pure (m, b))
                 machines
-  runner <- async (effectRunner rts)
+  runner <- mapM (const (async (effectRunner rts))) [1 .. max 1 nRunners]
   mths   <- mapM (\(m, b) -> async (machineThread rts b m)) mbags
   atomically $ do
     live <- readTVar (rtsLive rts)
@@ -1484,7 +1652,7 @@ runLoaded hooks machines initial = do
   extras <- readTVarIO (rtsExtra rts)
   mapM_ cancel extras
   atomically (writeTVar (rtsStop rts) True)
-  wait runner
+  mapM_ wait runner
   bag   <- bagContents (rtsBag rts)
   bags  <- traverse bagContents =<< readTVarIO (rtsBags rts)
   bytes <- readTVarIO (rtsBytes rts)
