@@ -280,7 +280,7 @@ Roughly in order of how foundational they are:
 10. **Top-level program grammar**: now that named bags exist, how do multiple `Name { ... }` blocks, `Global`'s implicit initial-tuple literal, and any other bag's initial state compose into one program's file-level syntax? Flagged early, never revisited. **Provisionally resolved** (§13.6, branch `runtime/named-bags-loader`): a `{ … }` initial block belongs to its nearest enclosing bag — top level is `Global`'s; at most one per bag; nothing else nests (a bag block may not contain another bag block, §6 — sharding is internal, §6.3).
 11. **Bytestring reclamation** — explicitly punted for now (§9); revisit if it matters later.
 12. **Default-Error-machine shutdown hazard**: a program that declares no `Error` block (so the §6.4 default `(c!) : panic c` machine is installed), has no `exit` path, and whose machines all terminate via `die` can never shut down cleanly — the default machine is an immortal parked thread, `rtsLive` never reaches 0, and the RTS aborts with `BlockedIndefinitelyOnSTM`, which Main.hs reports as the §1 deadlock message (exit 1) for what should be a clean exit 0. Repro and candidate fixes in `agent-history/messageboard/sleep-experiment/README.txt` (finding 5), discovered during the §13.21 sleep experiment. — **provisionally resolved** (§13.22, branch `runtime/idle-shutdown`): idle-exempt machines (`machIdle`) are not counted in the live total, and the shutdown check drains idle bags before cancelling so the guaranteed panic survives. Flip-worthy if any future machine class needs "parks forever but still gates shutdown".
-13. **`rand`'s default seed, and schedule-chaos knobs** (issue #41): the fixed constant default (`mkStdGen 12345`) is honest reproducibility for a language about races, but an entropy default is the flip-worthy alternative; the seed is now plumbing (`Hooks.hookSeed`, `--seed N|random` — §13.26). The broader fuzzing plan (Tier 1's in-engine chaos knob, Tier 2's program generator + oracles) lives in the issue: micro-yields between match-commit and bundle-push, a shuffled/pooled effect-runner drain, and multi-runner `runLoaded` variants as probes for what the single-runner FIFO actually promises (§11.7). — **Tier 1 provisionally resolved** (§13.27, branch `fuzz/chaos-knob`): the knob is `Chaos` on `Hooks` (`--chaos N|random`; micro-yields, shuffled queue picks, multi-runner `runLoadedN`), disabled by default; the examples seed-sweep found an emergent-FIFO reliance in two examples and a real commit→push bundle-loss window in the engine (fixed: bundles queue in the matching transaction). Entropy-default for `rand` remains the recorded flip.
+13. **`rand`'s default seed, and schedule-chaos knobs** (issue #41): the fixed constant default (`mkStdGen 12345`) is honest reproducibility for a language about races, but an entropy default is the flip-worthy alternative; the seed is now plumbing (`Hooks.hookSeed`, `--seed N|random` — §13.26). The broader fuzzing plan (Tier 1's in-engine chaos knob, Tier 2's program generator + oracles) lives in the issue: micro-yields between match-commit and bundle-push, a shuffled/pooled effect-runner drain, and multi-runner `runLoaded` variants as probes for what the single-runner FIFO actually promises (§11.7). — **Tier 1 provisionally resolved** (§13.27, branch `fuzz/chaos-knob`): the knob is `Chaos` on `Hooks` (`--chaos N|random`; micro-yields, shuffled queue picks, multi-runner `runLoadedN`), disabled by default; the examples seed-sweep found an emergent-FIFO reliance in two examples and a real commit→push bundle-loss window in the engine (fixed: bundles queue in the matching transaction). Entropy-default for `rand` remains the recorded flip. **New known hazard** (§13.28, branch `fuzz/sweep-wedge-hazard`): the sweep itself can hard-wedge the whole harness at soak scale — leaked `OHang` runs compound until a fresh `runLoadedN` stops being cancellable even by the watchdog — so soak runs are a gamble until per-iteration process isolation lands; root cause unpinned, repro recipe recorded.
 
 ---
 
@@ -1616,3 +1616,73 @@ promises:
   promote to the CLI if a use appears. Unchanged carries: `bytesBind`
   handle as expression, unified error routing (§3.3/§7.3), append mode
   (`A`).
+
+### 13.28 Finding — the chaos sweep can hard-wedge the whole harness at soak scale (§11.13, issue #41), branch `fuzz/sweep-wedge-hazard`
+
+A 1500-iteration soak of `lindana-fuzz` (`LINDANA_FUZZ_SEED=424242`)
+stalled the entire suite: no output, no exit, zero CPU, forever. This
+slice is the investigation. What is pinned, with evidence:
+
+- **The wedge is in the Tier-1 sweep** (`propSweep`), not the Tier-0
+  properties: bisected by iteration count (clean through 200, wedged
+  somewhere in 200–400), then standalone probes replicating
+  `FuzzMain`'s per-iteration sub-seed discipline pinpointed the sweep
+  iterations: 196 (`flaky.lind`, micro on, shuffle 0.25, runners 2),
+  272 (`throttle.lind`, micro off, shuffle 0.5, runners 2 — twice),
+  385 (`throttle.lind`, runners 3, `-threaded` build).
+- **The stage**: inside `runLoadedN` — the probe's trace printed
+  "running, N runners" and then nothing; "runLoadedN returned" never
+  printed, and *the outer 10s watchdog never fired either*. A wedged
+  run cannot be cancelled from the harness: `timeout` is not a
+  containment boundary here.
+- **It is accumulation-dependent**: the identical case run standalone
+  in a fresh process returns `OHang` via the watchdog in ~10s, every
+  time. The sweep's own leaks are the accumulating state: three
+  examples (`flaky`, `greeter`, `throttle`) have `OHang` baselines by
+  design (no exit path / infinite demo loops), and every sweep pick of
+  one abandons a full run's threads (the documented hazard). ~40–56
+  leaked runs preceded each observed wedge; ~27 leaky picks in the
+  195 clean iterations before the first one.
+- **Ruled out**: the non-threaded RTS (`-threaded` wedged too, later);
+  cross-run global state (none — each run owns its TVars; no
+  `unsafePerformIO` anywhere in `src/`); resource exhaustion (disk,
+  inodes fine; leaked temp files are closed handles); pure leak count
+  (500 leaked `flaky` runs, 400 leaked `throttle` runs in isolation —
+  no wedge; the compounding needs the mixed corpus, not volume).
+- **Working hypothesis** (not proven): leaked runs' threads interfere
+  with a fresh run so that the calling thread stops reaching a state
+  where async exceptions can be delivered — the wedge thread is
+  *blocked and idle* (0% CPU), which rules out an STM abort-retry
+  livelock; the suspects are the abandoned-threads-forever design
+  (§7.2 shutdown is graceful-drain, and there is no way to cancel a
+  run that missed its drain) meeting GHC's exception-delivery
+  guarantees at scale. Root cause NOT pinned — that is the honest
+  open question, and the recorded repro recipe above is the way to
+  re-chase it.
+- **Environment sensitivity**: the wedge reproduced consistently on
+  the original machine state (4 wedges, incl. two plain suite runs);
+  after a reboot it was not reproduced once across ~3400+ sweep
+  iterations (400/500/1500-iter sweeps, parallel instances, jittered
+  I/O variants, both RTS flavors). The race is real (it happened
+  repeatedly) but its probability depends on machine state no harness
+  control can pin. Treat soaks as a gamble until isolation lands.
+- **Why it matters**: a wedge stalls the whole suite *silently* —
+  `FuzzMain` runs properties sequentially and a stalled one reports
+  nothing — so a soak (or CI run) just hangs with no hint. This
+  slice's hardening: per-property progress lines on stderr (a stall
+  now at least names the victim) and the hazard note in
+  "Lindana.Fuzz.Chaos" corrected (the old note's "the leak is the
+  harness's, not the engine's" is still true, but its "die when they
+  notice rtsExit or are starved" understated the failure mode).
+- **Verification**: both suites green, zero `-Wall` warnings; the
+  BF-vs-chaos spot check that started the session stayed clean (25/25
+  `--chaos random` CLI runs of `brainfuck.lind` + every sweep pick of
+  it matched baseline — the interpreter is robust to the stir).
+- **Next**: OS-level isolation for sweep iterations is the recorded
+  fix shape — either a per-iteration forked helper or a CLI-driven
+  sweep variant (the CLI already has `--chaos N`; comparing exit
+  codes + captured output replaces `Outcome`'s deadlock/hang
+  normalization, which needs redesign) — this is a design decision,
+  not a patch, so it stays open. Pinning the root cause (the repro
+  recipe above) is the prerequisite for any engine-side claim. Tier 3
+  (`io-sim`) would make the wedge deterministic if it lands.

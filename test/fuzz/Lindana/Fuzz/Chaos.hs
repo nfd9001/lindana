@@ -18,7 +18,17 @@
 --     threads keep their own RTS alive (each run has a private one)
 --     and die when they notice @rtsExit@ or are starved. A hang is a
 --     finding either way; the leak is the harness's, not the
---     engine's.
+--     engine's. Known failure mode of that leak at soak scale
+--     (§13.28): the abandoned runs compound — three examples
+--     (@flaky@, @greeter@, @throttle@) have 'OHang' baselines by
+--     design (no exit path / infinite demo loops), so every sweep
+--     pick of one leaks a full run — and after a few dozen leaks the
+--     whole harness process has been observed to wedge inside a
+--     fresh 'runLoadedN', with even the outer 'timeout' never firing:
+--     the in-process watchdog is NOT a containment boundary. The
+--     recorded fix shape is process isolation per iteration (§11.13);
+--     until then, soaks are a gamble — the wedge is rare,
+--     environment-sensitive, and stalls the whole suite silently.
 --   * GHC's @BlockedIndefinitelyOnSTM@ deadlock detection is
 --     unreliable (the LoaderSpec note): a fully-blocked run may be
 --     reaped as a clean @ExitSuccess@ with leftover tuples instead of
@@ -54,7 +64,6 @@ import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import System.Directory (getTemporaryDirectory)
-import System.Exit (ExitCode (..))
 import System.Exit (ExitCode (..))
 import System.IO (hClose, openBinaryTempFile, stdin)
 import System.Random (StdGen, mkStdGen)
@@ -202,11 +211,11 @@ takeOut pat out = MachineDef
 propConserve :: Property
 propConserve seed = do
   let gen = do
-        n <- randR 1 15
-        gJobs <- mapM (const (randR 0 4)) [1 :: Int .. n]
+        gn <- randR 1 15
+        gJobs <- mapM (const (randR 0 4)) [1 :: Int .. gn]
         gCfg <- genChaos
-        gSeed <- randInt
-        pure (n, gJobs, gCfg, gSeed)
+        ggs <- randInt
+        pure (gn, gJobs, gCfg, ggs)
       (n, jobs, cfg, gSeed) = evalRand gen seed
       dispatch = takeOut (PTuple [PAtom "Do", PVar "i"])
                          (ETuple [EAtom "Job", EVar "i"])
@@ -260,8 +269,8 @@ propSweep examples baselines seed
       let gen = do
             gPath <- elements [p | (p, _) <- examples]
             gCfg <- genChaos
-            gSeed <- randInt
-            pure (gPath, gCfg, gSeed)
+            ggs <- randInt
+            pure (gPath, gCfg, ggs)
           (path, cfg, gSeed) = evalRand gen seed
           src = maybe (error "propSweep: unknown example") id
                 (lookup path examples)
