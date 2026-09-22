@@ -28,7 +28,7 @@ import System.Directory (doesDirectoryExist, listDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
 import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
+import System.IO (hFlush, hPutStrLn, stderr)
 import System.Random (mkStdGen, randomIO, split)
 import Text.Read (readMaybe)
 
@@ -52,6 +52,11 @@ main = do
           ++ " corpus=" ++ show (length corpus)
           ++ " examples=" ++ show (length runCorpus)
   forM_ specs $ \spec -> do
+    -- Per-property progress on stderr: a stalled property (the
+    -- §13.28 wedge) otherwise stalls the whole suite with zero
+    -- output — this line at least names the victim.
+    hPutStrLn stderr ("  running " ++ propName spec)
+    hFlush stderr
     outcome <- runProperty spec iters masterSeed
     case outcome of
       Nothing -> putStrLn ("  PASS " ++ propName spec

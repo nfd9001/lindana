@@ -33,4 +33,8 @@ with `LINDANA_FUZZ_ITERS=<n>` for a longer soak. Tier 0 sweeps pure
 properties over generated cases; Tier 1 turns the engine's own chaos
 knob up (`--chaos`, §11.13) — a contested conservation property under
 stirred schedules, and a seed-sweep of every example against its
-no-chaos baseline.
+no-chaos baseline. Known soak hazard (§13.28): the Tier-1 sweep can
+hard-wedge the whole suite at high iteration counts (leaked timed-out
+runs compound into an uncancellable state) — each property logs its
+start to stderr, and per-iteration process isolation is the recorded
+open fix.

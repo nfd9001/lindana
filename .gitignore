@@ -10,3 +10,4 @@ dist-newstyle/
 files-out.tmp
 stdio-out.tmp
 examples/stdio-out.tmp
+promote.out
